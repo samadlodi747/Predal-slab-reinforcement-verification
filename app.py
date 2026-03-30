@@ -114,31 +114,61 @@ def read_pdf(pdf_path):
     return pages, "\n".join(full_text_parts)
 
 
+
 def clean_spaces(s):
     return re.sub(r"[ \t]+", " ", s or "").strip()
 
 
-def extract_design_data(pdf_path):
-    pages, full_text = read_pdf(pdf_path)
+def normalize_storey_key(text):
+    txt = (text or "").upper()
+    compact = re.sub(r"\s+", "", txt)
+    if "FUNDERINGSPLAAT" in compact or "FUNDERING" in compact:
+        return "FOUNDATION"
+    for pat in [r"NIV\+?(-?\d+)", r"BOVEN\+?(-?\d+)", r"NIVEAU\+?(-?\d+)", r"LEVEL\+?(-?\d+)"]:
+        m = re.search(pat, compact)
+        if m:
+            return f"LEVEL_{m.group(1)}"
+    return None
 
-    combo_pat = re.compile(
-        r"HW\s+([0-9.]+)\s*cm²/lm\s*DW\s+([0-9.]+)\s*cm²/lm\s*VW\s*d(\d+)\s*a15\s*L=?([0-9]+)cm",
+
+def _family_pattern():
+    return re.compile(
+        r"HW\s*([0-9]+(?:[\.,][0-9]+)?)\s*cm[²2]/l[mn]"
+        r"\s*DW\s*([0-9]+(?:[\.,][0-9]+)?)\s*cm[²2]/l[mn]"
+        r"(?:\s*(?:B\d+-150)\s*)?"
+        r"(?:\s*VW\s*d\s*(\d+)\s*a\s*(\d+)\s*cm?\s*L\s*=?\s*([0-9]+)\s*cm)?",
         re.I | re.S,
     )
+
+
+def _parse_design_families_from_text(text):
     families = set()
+    pat = _family_pattern()
+    normalized = clean_spaces((text or "").replace(",", "."))
+    for m in pat.finditer(normalized):
+        hw = float(m.group(1))
+        dw = float(m.group(2))
+        vw_d = int(m.group(3)) if m.group(3) else None
+        vw_a = int(m.group(4)) if m.group(4) else None
+        vw_l = int(m.group(5)) if m.group(5) else None
+        families.add((hw, dw, vw_d, vw_l))
+    return families
+
+
+def extract_design_data(pdf_path, supplier_full_text=None):
+    pages, full_text = read_pdf(pdf_path)
+
+    families = set()
+
+    # Primary extraction: page blocks
     for page in pages:
         for block in page["blocks"]:
             block_text = clean_spaces(block[4])
-            match = combo_pat.search(block_text)
-            if match:
-                families.add(
-                    (
-                        float(match.group(1)),
-                        float(match.group(2)),
-                        int(match.group(3)),
-                        int(match.group(4)),
-                    )
-                )
+            families |= _parse_design_families_from_text(block_text)
+
+    # Fallback extraction: full page text (important when OCR/blocks split or spacing differs like "a 15cm")
+    if not families:
+        families |= _parse_design_families_from_text(full_text)
 
     concrete = None
     steel = None
@@ -173,6 +203,7 @@ def extract_design_data(pdf_path):
         "slab_notes": slab_notes,
         "supplier_det_note": supplier_det_note,
         "full_text": full_text,
+        "storey_hint": normalize_storey_key(supplier_full_text or ""),
     }
 
 
@@ -700,8 +731,8 @@ def generate():
         design_file.save(design_path)
         supplier_file.save(supplier_path)
 
-        design = extract_design_data(design_path)
         supplier = extract_supplier_data(supplier_path)
+        design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
 
         if not supplier["rows"]:
             return (
