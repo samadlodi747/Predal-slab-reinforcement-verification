@@ -444,7 +444,14 @@ def parse_drawing_supplier(pages, full_text, supplier_label):
         size = size_assignments.get(plate["plate"])
         if not size:
             continue
-        rein = _nearest_reinforcement(plate["center"], rein_blocks)
+        # Use the assigned size block center as the primary anchor for reinforcement lookup.
+        # In drawing-based supplier PDFs (e.g. Oeterbeton), the plate label is often placed near
+        # a boundary between adjacent plates, while the size block sits inside the actual plate area.
+        # Looking up the nearest reinforcement from the label center can therefore snap a boundary
+        # plate to a neighbouring reinforcement note (plate 23 in the Wilselsesteenweg case).
+        # The size block center is a more stable proxy for the plate interior.
+        rein_anchor = size["center"]
+        rein = _nearest_reinforcement(rein_anchor, rein_blocks)
         if not rein:
             continue
 
