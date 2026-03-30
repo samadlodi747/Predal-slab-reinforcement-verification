@@ -1,18 +1,19 @@
 
+import io
+import math
 import os
 import re
-import tempfile
 from statistics import mean
-from flask import Flask, request, send_file, render_template_string
-from werkzeug.middleware.proxy_fix import ProxyFix
-import io
+
 import fitz
-from reportlab.lib.pagesizes import A3, landscape
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, Table, TableStyle, PageBreak
+from flask import Flask, render_template_string, request, send_file
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
+from reportlab.lib.pagesizes import A3, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
@@ -27,7 +28,7 @@ INDEX_HTML = """
   <title>Predal Reinforcement Verifier</title>
   <style>
     body { font-family: Arial, sans-serif; background:#f5f7fb; color:#1c2430; margin:0; }
-    .wrap { max-width: 900px; margin: 32px auto; background:#fff; border:1px solid #d9e2ec; border-radius:16px; box-shadow:0 12px 28px rgba(0,0,0,.05); overflow:hidden; }
+    .wrap { max-width: 980px; margin: 32px auto; background:#fff; border:1px solid #d9e2ec; border-radius:16px; box-shadow:0 12px 28px rgba(0,0,0,.05); overflow:hidden; }
     .hero { padding: 28px 32px; background:#163A63; color:#fff; }
     .hero h1 { margin:0 0 8px; font-size:28px; }
     .hero p { margin:0; line-height:1.45; opacity:.95; }
@@ -49,6 +50,7 @@ INDEX_HTML = """
     button:hover { background:#1d4a7d; }
     ul { margin:10px 0 0 18px; line-height:1.5; }
     .footer { color:#5a6b7f; font-size:13px; margin-top:14px; }
+    code { background:#eef3f8; padding:2px 6px; border-radius:6px; }
     @media (max-width: 760px) { .grid { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -76,12 +78,11 @@ INDEX_HTML = """
         </div>
 
         <div class="note">
-          <strong>How the automatic check works</strong>
+          <strong>Multi-supplier parsing</strong>
           <ul>
-            <li>Reads design reinforcement families from the design PDF (HW / DW / VW).</li>
-            <li>Reads supplier plate table values from the supplier PDF.</li>
-            <li>Converts supplier mm2/m to cm2/m and performs exact family matching.</li>
-            <li>Builds an A3 landscape PDF report with plate table, global parameter checks, sanity check, and engineering conclusion.</li>
+            <li>Supplier format is auto-detected where possible.</li>
+            <li>Dedicated parsers are included for tabular Predalco / IBO-type sheets and Oeterbeton / drawing-embedded sheets.</li>
+            <li>A generic drawing fallback tries to read plate labels, plate sizes, and reinforcement labels from spatial PDF text blocks.</li>
           </ul>
         </div>
 
@@ -99,58 +100,68 @@ INDEX_HTML = """
 </html>
 """
 
-def read_blocks(pdf_path):
+
+def read_pdf(pdf_path):
     doc = fitz.open(pdf_path)
-    blocks = []
+    pages = []
     full_text_parts = []
     for page in doc:
-        page_blocks = page.get_text("blocks", sort=True)
-        blocks.extend(page_blocks)
-        for block in page_blocks:
-            full_text_parts.append(block[4])
-    return blocks, "\n".join(full_text_parts)
+        blocks = page.get_text("blocks", sort=True)
+        words = page.get_text("words")
+        text = page.get_text("text", sort=True)
+        pages.append({"blocks": blocks, "words": words, "text": text})
+        full_text_parts.append(text)
+    return pages, "\n".join(full_text_parts)
+
+
+def clean_spaces(s):
+    return re.sub(r"[ \t]+", " ", s or "").strip()
+
 
 def extract_design_data(pdf_path):
-    blocks, full_text = read_blocks(pdf_path)
+    pages, full_text = read_pdf(pdf_path)
+
     combo_pat = re.compile(
-        r"HW\s+([0-9.]+)\s*cm²/lm\s*DW\s+([0-9.]+)\s*cm²/lm\s*VW\s+d(\d+)\s*a15\s*L=?([0-9]+)cm",
+        r"HW\s+([0-9.]+)\s*cm²/lm\s*DW\s+([0-9.]+)\s*cm²/lm\s*VW\s*d(\d+)\s*a15\s*L=?([0-9]+)cm",
         re.I | re.S,
     )
     families = set()
-    for block in blocks:
-        match = combo_pat.search(block[4].replace("  ", " "))
-        if match:
-            families.add(
-                (
-                    float(match.group(1)),
-                    float(match.group(2)),
-                    int(match.group(3)),
-                    int(match.group(4)),
+    for page in pages:
+        for block in page["blocks"]:
+            block_text = clean_spaces(block[4])
+            match = combo_pat.search(block_text)
+            if match:
+                families.add(
+                    (
+                        float(match.group(1)),
+                        float(match.group(2)),
+                        int(match.group(3)),
+                        int(match.group(4)),
+                    )
                 )
-            )
 
     concrete = None
     steel = None
     top_mesh = None
     fire_req = None
 
-    concrete_match = re.search(r"ALGEMEENHEDEN BOVENBOUW.*?betonkwaliteit:\s*(C\d+/\d+)", full_text, re.S)
+    concrete_match = re.search(r"ALGEMEENHEDEN BOVENBOUW.*?betonkwaliteit:\s*(C\d+/\d+)", full_text, re.S | re.I)
     if concrete_match:
-        concrete = concrete_match.group(1)
+        concrete = concrete_match.group(1).upper()
 
-    steel_match = re.search(r"ALGEMEENHEDEN BOVENBOUW.*?wapeningskwaliteit:\s*([A-Z0-9]+)", full_text, re.S)
+    steel_match = re.search(r"ALGEMEENHEDEN BOVENBOUW.*?wapeningskwaliteit:\s*([A-Z0-9]+)", full_text, re.S | re.I)
     if steel_match:
-        steel = steel_match.group(1)
+        steel = steel_match.group(1).upper()
 
-    mesh_hits = re.findall(r'B\d+-150', full_text)
+    mesh_hits = re.findall(r'B\d+-150', full_text, re.I)
     if mesh_hits:
-        top_mesh = sorted(set(mesh_hits))[0]
+        top_mesh = sorted({m.upper() for m in mesh_hits})[0]
 
-    fire_match = re.search(r"Brandweerstand:\s*([^\n]+)", full_text)
+    fire_match = re.search(r"Brandweerstand:\s*([^\n]+)", full_text, re.I)
     if fire_match:
-        fire_req = fire_match.group(1).strip()
+        fire_req = clean_spaces(fire_match.group(1))
 
-    slab_notes = sorted(set(re.findall(r"Predallen\s+\d\+\d+", full_text)))
+    slab_notes = sorted(set(re.findall(r"Predallen\s+\d\+\d+", full_text, re.I)))
     supplier_det_note = "supplier" if re.search(r"Dikte van de predalplaat.*leverancier", full_text, re.I) else None
 
     return {
@@ -164,111 +175,341 @@ def extract_design_data(pdf_path):
         "full_text": full_text,
     }
 
-def extract_supplier_data(pdf_path):
-    blocks, full_text = read_blocks(pdf_path)
-    rows = []
-    supplier_steel = None
+
+def detect_supplier_format(full_text):
+    txt = full_text.lower()
+    if "oeterbeton" in txt or "o e t e r" in txt:
+        return "oeterbeton_drawing"
+    if "inclusief tralies" in txt and "glad" in txt and "rei" in txt:
+        return "predalco_table"
+    return "generic_drawing"
+
+
+def parse_common_supplier_meta(full_text):
+    concrete = None
+    concrete_matches = re.findall(r"\bC\d+/\d+\b", full_text, re.I)
+    if concrete_matches:
+        concrete = concrete_matches[0].upper()
+
+    steel = None
+    steel_patterns = [
+        r"Wapening\s*:\s*staalkwaliteit\s*([A-Z0-9 ]+(?:of[A-Z0-9 ]+)?)",
+        r"staalkwaliteit\s*(DE\s*500\s*BS|BE\s*500(?:ES|BS)?|BE500(?:ES|BS)?)",
+        r"kwaliteit d[' ]acier\s*(DE\s*500\s*BS|BE\s*500(?:ES|BS)?)",
+    ]
+    for pat in steel_patterns:
+        m = re.search(pat, full_text, re.I)
+        if m:
+            steel = clean_spaces(m.group(1)).upper().replace(" ", "")
+            break
+
     top_mesh_note = None
-    fire_default = None
+    for pat in [r"Bovenwapening\s*:\s*([^\n]+)", r"Armatures sup[ée]rieures\s*:\s*([^\n]+)"]:
+        m = re.search(pat, full_text, re.I)
+        if m:
+            top_mesh_note = clean_spaces(m.group(1))
+            break
 
-    steel_match = re.search(r"Wapening\s*:\s*staalkwaliteit\s*([A-Z0-9]+(?:\s*of\s*[A-Z0-9]+)?)", full_text, re.I)
-    if steel_match:
-        supplier_steel = steel_match.group(1).strip()
+    fire = None
+    m = re.search(r"(REI\s*\d+)", full_text, re.I)
+    if m:
+        fire = clean_spaces(m.group(1)).upper()
 
-    mesh_match = re.search(r"Bovenwapening\s*:\s*([^\n]+)", full_text, re.I)
-    if mesh_match:
-        top_mesh_note = mesh_match.group(1).strip()
+    return {"concrete": concrete, "supplier_steel": steel, "top_mesh_note": top_mesh_note, "fire_default": fire}
 
-    fire_match = re.search(r"Brandweerstand\s*:\s*([A-Z0-9 ]+)", full_text, re.I)
-    if fire_match:
-        fire_default = fire_match.group(1).strip()
 
-    for block in blocks:
-        lines = [ln.strip() for ln in block[4].splitlines() if ln.strip()]
-        if "REI 60" not in lines or "Glad" not in lines:
-            continue
+def finalize_row(row):
+    row["langs_cm2m"] = round(row["langs_mm2m"] / 100.0, 2)
+    row["dwars_cm2m"] = round(row["dwars_mm2m"] / 100.0, 2)
+    row["plate_size"] = f"{row['length']} x {row['width']}"
+    return row
 
-        rei_idx = lines.index("REI 60")
-        glad_idx = lines.index("Glad")
-        pre = lines[:glad_idx]
-        post = lines[glad_idx + 1 : rei_idx]
 
-        if len(pre) < 11:
-            continue
+def parse_predalco_table(pages, full_text):
+    meta = parse_common_supplier_meta(full_text)
+    rows = []
 
-        nums_after_glad = [int(v) for v in post if re.fullmatch(r"\d+", v)]
-        cover = nums_after_glad[-1] if nums_after_glad else None
-        uws = nums_after_glad[:-1] if len(nums_after_glad) >= 1 else []
+    for page in pages:
+        for block in page["blocks"]:
+            lines = [ln.strip() for ln in block[4].splitlines() if ln.strip()]
+            glad_idx = next((i for i, ln in enumerate(lines) if ln.lower() == "glad"), None)
+            rei_idx = next((i for i, ln in enumerate(lines) if re.fullmatch(r"REI\s*\d+", ln, re.I)), None)
+            if glad_idx is None or rei_idx is None or glad_idx >= rei_idx:
+                continue
 
-        row = {
-            "plate": int(pre[4]),
-            "article": int(pre[1]),
-            "tralie_h": int(pre[2]),
-            "floor_thk": int(pre[3]),
-            "length": int(pre[5]),
-            "predal_thk": int(pre[6]),
-            "width": int(pre[7]),
-            "langs_mm2m": int(pre[8]),
-            "dwars_mm2m": int(pre[9]),
-            "weight_kg": int(pre[10]),
-            "type": pre[0],
-            "uw1": uws[0] if len(uws) > 0 else None,
-            "uw2": uws[1] if len(uws) > 1 else None,
-            "cover": cover,
-            "fire": "REI 60",
-            "env": lines[rei_idx + 1] if len(lines) > rei_idx + 1 else None,
-            "concrete": lines[rei_idx + 2] if len(lines) > rei_idx + 2 else None,
-        }
-        row["langs_cm2m"] = row["langs_mm2m"] / 100.0
-        row["dwars_cm2m"] = row["dwars_mm2m"] / 100.0
-        row["plate_size"] = f"{row['length']} x {row['width']}"
-        rows.append(row)
+            pre = lines[:glad_idx]
+            post = lines[glad_idx + 1 : rei_idx]
+
+            if len(pre) < 10:
+                continue
+            if not all(re.fullmatch(r"\d+", token) for token in pre[1:10]):
+                continue
+
+            nums_after_glad = [int(v) for v in post if re.fullmatch(r"\d+", v)]
+            cover = nums_after_glad[-1] if nums_after_glad else None
+            uws = nums_after_glad[:-1] if len(nums_after_glad) >= 1 else []
+            fire_line = lines[rei_idx]
+
+            try:
+                row = {
+                    "plate": int(pre[4]),
+                    "article": int(pre[1]),
+                    "tralie_h": int(pre[2]),
+                    "floor_thk": int(pre[3]),
+                    "length": int(pre[5]),
+                    "predal_thk": int(pre[6]),
+                    "width": int(pre[7]),
+                    "langs_mm2m": int(pre[8]),
+                    "dwars_mm2m": int(pre[9]),
+                    "weight_kg": int(pre[10]) if len(pre) > 10 and re.fullmatch(r"\d+", pre[10]) else None,
+                    "type": pre[0],
+                    "uw1": uws[0] if len(uws) > 0 else None,
+                    "uw2": uws[1] if len(uws) > 1 else None,
+                    "cover": cover,
+                    "fire": clean_spaces(fire_line).upper(),
+                    "env": lines[rei_idx + 1] if len(lines) > rei_idx + 1 else None,
+                    "concrete": clean_spaces(lines[rei_idx + 2]).upper() if len(lines) > rei_idx + 2 else meta["concrete"],
+                    "supplier_format": "Predalco / IBO tabular parser",
+                }
+            except Exception:
+                continue
+            rows.append(finalize_row(row))
 
     rows.sort(key=lambda x: x["plate"])
+    meta["rows"] = rows
+    meta["supplier_format"] = "Predalco / IBO tabular parser"
+    return meta
 
-    return {
-        "rows": rows,
-        "supplier_steel": supplier_steel,
-        "top_mesh_note": top_mesh_note,
-        "fire_default": fire_default,
-        "full_text": full_text,
-    }
 
-def build_report(design, supplier, output_pdf_path, project_title=""):
-    design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
+def _center_from_block(block):
+    x0, y0, x1, y1 = block[:4]
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+
+def _parse_plate_label_blocks(blocks):
+    out = []
+    for block in blocks:
+        t = block[4].strip()
+        m = re.fullmatch(r"(\d{2,3})\s*\n([A-Z]\d+(?:-\d+)+)", t)
+        if m:
+            out.append(
+                {
+                    "plate": int(m.group(1)),
+                    "code": m.group(2),
+                    "block": block,
+                    "center": _center_from_block(block),
+                }
+            )
+    return out
+
+
+def _parse_size_blocks(blocks):
+    out = []
+    for block in blocks:
+        t = block[4].strip()
+        m = re.fullmatch(r"(\d{3,5})\s*\n(\d{3,4})\s*\n(\d{2,4})", t)
+        if not m:
+            continue
+        length, width, kg = map(int, m.groups())
+        if length < 500 or width < 300 or length < width:
+            continue
+        out.append(
+            {
+                "length": length,
+                "width": width,
+                "weight_kg": kg,
+                "block": block,
+                "center": _center_from_block(block),
+            }
+        )
+    return out
+
+
+def _parse_reinf_blocks(blocks):
+    out = []
+    for block in blocks:
+        t = block[4].strip()
+        m = re.fullmatch(r"(\d{3,4})\s*\n(\d{3,4})", t)
+        if not m:
+            continue
+        langs, dwars = map(int, m.groups())
+        if langs < 250 or langs > 2500 or dwars < 250 or dwars > 1200:
+            continue
+        if langs < dwars:
+            continue
+        out.append(
+            {
+                "langs_mm2m": langs,
+                "dwars_mm2m": dwars,
+                "block": block,
+                "center": _center_from_block(block),
+            }
+        )
+    return out
+
+
+def _greedy_assign_unique(plates, candidates):
+    remaining = set(range(len(candidates)))
+    assignments = {}
+    for p in sorted(plates, key=lambda item: (item["center"][1], item["center"][0])):
+        if not remaining:
+            break
+        ranked = []
+        for i in remaining:
+            cx, cy = candidates[i]["center"]
+            px, py = p["center"]
+            dist = math.hypot(px - cx, py - cy)
+            ranked.append((dist, i))
+        ranked.sort(key=lambda t: t[0])
+        assignments[p["plate"]] = candidates[ranked[0][1]]
+        remaining.remove(ranked[0][1])
+    return assignments
+
+
+def _nearest_reinforcement(center, reinforcements):
+    px, py = center
+    ranked = []
+    for item in reinforcements:
+        cx, cy = item["center"]
+        dist = math.hypot(px - cx, py - cy)
+        ranked.append((dist, item))
+    ranked.sort(key=lambda t: t[0])
+    return ranked[0][1] if ranked else None
+
+
+def parse_drawing_supplier(pages, full_text, supplier_label):
+    meta = parse_common_supplier_meta(full_text)
+    plates = []
+    size_blocks = []
+    rein_blocks = []
+
+    for page in pages:
+        blocks = page["blocks"]
+        page_plates = [p for p in _parse_plate_label_blocks(blocks) if p["center"][1] > 250]
+        if not page_plates:
+            continue
+
+        min_x = min(p["block"][0] for p in page_plates) - 240
+        max_x = max(p["block"][2] for p in page_plates) + 240
+        min_y = min(p["block"][1] for p in page_plates) - 180
+        max_y = max(p["block"][3] for p in page_plates) + 220
+
+        def in_region(block):
+            x0, y0, x1, y1 = block[:4]
+            return x0 >= min_x and x1 <= max_x and y0 >= min_y and y1 <= max_y
+
+        candidate_blocks = [b for b in blocks if in_region(b)]
+        plates.extend(page_plates)
+        size_blocks.extend(_parse_size_blocks(candidate_blocks))
+        rein_blocks.extend(_parse_reinf_blocks(candidate_blocks))
+
+    if not plates or not size_blocks:
+        return {**meta, "rows": [], "supplier_format": supplier_label}
+
+    size_assignments = _greedy_assign_unique(plates, size_blocks)
+    rows = []
+
+    for plate in sorted(plates, key=lambda x: x["plate"]):
+        size = size_assignments.get(plate["plate"])
+        if not size:
+            continue
+        rein = _nearest_reinforcement(plate["center"], rein_blocks)
+        if not rein:
+            continue
+
+        predal_thk = None
+        floor_thk = None
+        code_match = re.match(r"[A-Z](\d+)-(\d+)", plate["code"])
+        if code_match:
+            predal_thk = int(code_match.group(1))
+            floor_thk = int(code_match.group(2))
+
+        row = {
+            "plate": plate["plate"],
+            "article": None,
+            "tralie_h": None,
+            "floor_thk": floor_thk,
+            "length": size["length"],
+            "predal_thk": predal_thk,
+            "width": size["width"],
+            "langs_mm2m": rein["langs_mm2m"],
+            "dwars_mm2m": rein["dwars_mm2m"],
+            "weight_kg": size["weight_kg"],
+            "type": plate["code"],
+            "uw1": None,
+            "uw2": None,
+            "cover": None,
+            "fire": meta["fire_default"],
+            "env": None,
+            "concrete": meta["concrete"],
+            "supplier_format": supplier_label,
+        }
+        rows.append(finalize_row(row))
+
+    rows.sort(key=lambda x: x["plate"])
+    meta["rows"] = rows
+    meta["supplier_format"] = supplier_label
+    return meta
+
+
+def extract_supplier_data(pdf_path):
+    pages, full_text = read_pdf(pdf_path)
+    supplier_format = detect_supplier_format(full_text)
+
+    predalco_data = parse_predalco_table(pages, full_text)
+    if predalco_data["rows"]:
+        data = predalco_data
+        supplier_format = "predalco_table"
+    elif supplier_format == "oeterbeton_drawing":
+        data = parse_drawing_supplier(pages, full_text, "Oeterbeton drawing parser")
+    else:
+        data = parse_drawing_supplier(pages, full_text, "Generic drawing parser")
+
+    data["full_text"] = full_text
+    data["detected_supplier_format"] = supplier_format
+    return data
+
+
+def build_report_pdf_bytes(design, supplier, project_title=""):
     rows = supplier["rows"]
+    design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
 
     comparison_rows = []
+    exact_ok = 0
     for row in rows:
         pair = (row["langs_cm2m"], row["dwars_cm2m"])
-        row["status"] = "OK" if pair in design_family_map else "CHECK"
-        row["design_hw"] = row["langs_cm2m"] if pair in design_family_map else None
-        row["design_dw"] = row["dwars_cm2m"] if pair in design_family_map else None
-        comparison_rows.append([
-            str(row["plate"]),
-            row["plate_size"],
-            (
-                f"HW {row['design_hw']:.2f} / DW {row['design_dw']:.2f}"
-                if row["design_hw"] is not None
-                else "No exact family found on design sheet"
-            ),
-            f"Langs {row['langs_mm2m']} / Dwars {row['dwars_mm2m']}",
-            row["status"],
-        ])
+        is_exact = pair in design_family_map
+        row["status"] = "OK" if is_exact else "CHECK"
+        if is_exact:
+            exact_ok += 1
+        comparison_rows.append(
+            [
+                str(row["plate"]),
+                row["plate_size"],
+                (
+                    f"HW {row['langs_cm2m']:.2f} / DW {row['dwars_cm2m']:.2f}"
+                    if is_exact
+                    else "No exact family found on design sheet"
+                ),
+                f"Langs {row['langs_mm2m']} / Dwars {row['dwars_mm2m']}",
+                row["status"],
+            ]
+        )
 
-    predal_thicknesses = sorted({row["predal_thk"] for row in rows})
-    total_thicknesses = sorted({row["floor_thk"] for row in rows})
-    supplier_concretes = sorted({row["concrete"] for row in rows if row["concrete"]})
-    supplier_fires = sorted({row["fire"] for row in rows if row["fire"]})
+    predal_thicknesses = sorted({row["predal_thk"] for row in rows if row.get("predal_thk") is not None})
+    total_thicknesses = sorted({row["floor_thk"] for row in rows if row.get("floor_thk") is not None})
+    supplier_concretes = sorted({str(row["concrete"]).upper() for row in rows if row.get("concrete")})
+    supplier_fires = sorted({str(row["fire"]).upper() for row in rows if row.get("fire")})
 
-    concrete_status = "OK" if design["concrete"] and supplier_concretes and all(c.lower() == design["concrete"].lower() for c in supplier_concretes) else "CHECK"
+    concrete_status = "OK" if design["concrete"] and supplier_concretes and all(c == design["concrete"] for c in supplier_concretes) else "CHECK"
     steel_status = "OK" if design["steel"] and supplier["supplier_steel"] and design["steel"] in supplier["supplier_steel"] else "CHECK"
     predal_status = "OK" if predal_thicknesses else "CHECK"
-    total_status = "CHECK"
+    total_status = "CHECK" if total_thicknesses else "CHECK"
     mesh_status = "CHECK"
     fire_status = "CHECK"
 
     global_rows = [
+        ["Detected supplier parser", "Auto detection", supplier.get("supplier_format", "Not found"), "OK" if rows else "CHECK"],
         ["Concrete class", f"{design['concrete'] or 'Not found'} minimum", ", ".join(supplier_concretes) or "Not found", concrete_status],
         ["Steel grade", design["steel"] or "Not found", supplier["supplier_steel"] or "Not found", steel_status],
         ["Predal thickness", "Supplier to determine (design note)" if design["supplier_det_note"] else "Design note not found", ", ".join(str(v) for v in predal_thicknesses) + " mm" if predal_thicknesses else "Not found", predal_status],
@@ -276,8 +517,6 @@ def build_report(design, supplier, output_pdf_path, project_title=""):
         ["Mesh reinforcement", design["top_mesh"] or "Not found", supplier["top_mesh_note"] or "Not found", mesh_status],
         ["Fire resistance", design["fire_req"] or "Not found", ", ".join(supplier_fires) if supplier_fires else (supplier["fire_default"] or "Not found"), fire_status],
     ]
-
-    exact_ok = sum(1 for row in rows if row["status"] == "OK")
 
     dwars_ok = []
     for row in rows:
@@ -297,16 +536,18 @@ def build_report(design, supplier, output_pdf_path, project_title=""):
             bin_lines.append(f"{label}: n={len(bucket)}, langs avg={mean(bucket):.1f} mm2/m, range {min(bucket)}-{max(bucket)}")
 
     sanity_lines = [
-        f"All {len(rows)} supplier plates were parsed from the supplier PDF.",
-        f"{exact_ok} / {len(rows)} plates match one of the reinforcement families explicitly readable on the design PDF after converting mm2/m to cm2/m.",
-        f"Transverse reinforcement minimum check (>= 1/5 of main and >= 2.50 cm2/m): {'OK' if all(dwars_ok) else 'CHECK'}.",
+        f"Detected parser: {supplier.get('supplier_format', 'Unknown')}.",
+        f"All {len(rows)} supplier plates parsed from the supplier PDF." if rows else "No supplier plates could be parsed from the supplier PDF.",
+        f"{exact_ok} / {len(rows)} plates match one of the reinforcement families explicitly readable on the design PDF after converting mm2/m to cm2/m." if rows else "No plate-by-plate comparison could be completed.",
+        f"Transverse reinforcement minimum check (>= 1/5 of main and >= 2.50 cm2/m): {'OK' if dwars_ok and all(dwars_ok) else 'CHECK'}.",
         "Exact geometric zone-to-plate mapping and span-direction verification cannot be proven from text extraction alone when the design sheet does not expose structured zone data.",
-        "Length-based reinforcement trend: " + " | ".join(bin_lines),
     ]
+    if bin_lines:
+        sanity_lines.append("Length-based reinforcement trend: " + " | ".join(bin_lines))
 
     conclusion_lines = [
-        f"Numerical family check result: {exact_ok} / {len(rows)} plates are OK in the exact reinforcement-family comparison.",
-        "This automated workflow is reliable for extracting supplier plate data and matching reinforcement families.",
+        f"Numerical family check result: {exact_ok} / {len(rows)} plates are OK in the exact reinforcement-family comparison." if rows else "Numerical family check result: no rows parsed.",
+        "This automated workflow is reliable for supplier formats that expose readable plate labels, plate sizes, and reinforcement values in PDF text.",
         "Before final approval, visually confirm reinforcement zone locations, main span direction, mesh requirement, and slab build-up areas on the full drawing set.",
     ]
 
@@ -318,8 +559,9 @@ def build_report(design, supplier, output_pdf_path, project_title=""):
     styles.add(ParagraphStyle(name="SmallX", parent=styles["Normal"], fontName="Helvetica", fontSize=8, leading=10, textColor=HexColor("#555555")))
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=10.5))
 
+    pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        output_pdf_path,
+        pdf_buffer,
         pagesize=landscape(A3),
         leftMargin=14 * mm,
         rightMargin=14 * mm,
@@ -328,155 +570,154 @@ def build_report(design, supplier, output_pdf_path, project_title=""):
     )
 
     title = project_title.strip() or "Predal reinforcement verification"
-
     story = []
     story.append(Paragraph("Predal Reinforcement Verification Report", styles["TitleX"]))
     story.append(Paragraph(f"Project: {title}", styles["SubX"]))
-    story.append(Paragraph("Method: automatic PDF extraction, exact reinforcement-family matching, global parameter checks, and structural sanity checks.", styles["SubX"]))
+    story.append(Paragraph("Method: automatic PDF extraction, supplier auto-detection, exact reinforcement-family matching, global parameter checks, and structural sanity checks.", styles["SubX"]))
     story.append(Spacer(1, 6))
 
     key_data = [[
-        Paragraph("<b>Report summary</b>", styles["BodyX"]),
-        Paragraph(f"{len(rows)} supplier plates parsed<br/>{len(design['families'])} design reinforcement families identified<br/>{exact_ok} / {len(rows)} exact family matches", styles["BodyX"]),
-        Paragraph("A3 landscape report<br/>Global parameters included<br/>Manual overlay still required for final approval", styles["BodyX"]),
+        Paragraph("Report summary", styles["BodyX"]),
+        Paragraph(
+            f"{len(rows)} supplier plates parsed<br/>{len(design['families'])} design reinforcement families identified<br/>{exact_ok} / {len(rows)} exact family matches",
+            styles["BodyX"],
+        ),
+        Paragraph(
+            f"A3 landscape report<br/>Detected parser: {supplier.get('supplier_format', 'Unknown')}<br/>Global parameters included",
+            styles["BodyX"],
+        ),
     ]]
-    key_table = Table(key_data, colWidths=[70 * mm, 85 * mm, 85 * mm])
-    key_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), HexColor("#F2F6FA")),
-        ("BOX", (0, 0), (-1, -1), 0.6, HexColor("#9FB3C8")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.3, HexColor("#D3DDE7")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    key_tbl = LongTable(key_data, colWidths=[60 * mm, 95 * mm, 95 * mm])
+    key_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), HexColor("#EEF4FA")),
+        ("BOX", (0, 0), (-1, -1), 0.6, HexColor("#B8C7D9")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, HexColor("#C8D4E3")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
-    story.append(key_table)
+    story.append(key_tbl)
     story.append(Spacer(1, 8))
-    story.append(Paragraph("Plate-by-plate comparison", styles["HeadX"]))
 
-    comp_data = [[
-        Paragraph("<b>Plate</b>", styles["TableCell"]),
-        Paragraph("<b>Plate size (mm)</b>", styles["TableCell"]),
-        Paragraph("<b>Matched design family (cm2/m)</b>", styles["TableCell"]),
-        Paragraph("<b>Supplier reinforcement (mm2/m)</b>", styles["TableCell"]),
-        Paragraph("<b>Status</b>", styles["TableCell"]),
+    story.append(Paragraph("Predal Reinforcement Comparison", styles["HeadX"]))
+    comp_table_data = [[
+        Paragraph("Plate", styles["TableCell"]),
+        Paragraph("Plate size (mm)", styles["TableCell"]),
+        Paragraph("Design reinforcement (cm2/m)", styles["TableCell"]),
+        Paragraph("Supplier reinforcement (mm2/m)", styles["TableCell"]),
+        Paragraph("Status", styles["TableCell"]),
     ]]
     for row in comparison_rows:
-        comp_data.append([Paragraph(cell, styles["TableCell"]) for cell in row])
+        comp_table_data.append([Paragraph(v, styles["TableCell"]) for v in row])
 
-    comp_table = LongTable(comp_data, repeatRows=1, colWidths=[18 * mm, 36 * mm, 56 * mm, 54 * mm, 18 * mm])
-    comp_table.setStyle(TableStyle([
+    comp_col_widths = [20 * mm, 42 * mm, 68 * mm, 55 * mm, 22 * mm]
+    comp_tbl = LongTable(comp_table_data, colWidths=comp_col_widths, repeatRows=1)
+    comp_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), HexColor("#163A63")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 9),
-        ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#AEBBC9")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#9FB2C8")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D3DDE8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F8FBFD")]),
-        ("ALIGN", (0, 1), (0, -1), "CENTER"),
-        ("ALIGN", (-1, 1), (-1, -1), "CENTER"),
     ]))
-    story.append(comp_table)
+    story.append(comp_tbl)
     story.append(PageBreak())
 
-    story.append(Paragraph("Global parameter comparison", styles["HeadX"]))
-    global_data = [[
-        Paragraph("<b>Parameter</b>", styles["TableCell"]),
-        Paragraph("<b>Design requirement</b>", styles["TableCell"]),
-        Paragraph("<b>Supplier provided</b>", styles["TableCell"]),
-        Paragraph("<b>Status</b>", styles["TableCell"]),
+    story.append(Paragraph("Global Parameter Comparison", styles["HeadX"]))
+    global_table_data = [[
+        Paragraph("Parameter", styles["TableCell"]),
+        Paragraph("Design requirement", styles["TableCell"]),
+        Paragraph("Supplier provided", styles["TableCell"]),
+        Paragraph("Status", styles["TableCell"]),
     ]]
     for row in global_rows:
-        global_data.append([Paragraph(cell, styles["TableCell"]) for cell in row])
+        global_table_data.append([Paragraph(v, styles["TableCell"]) for v in row])
 
-    global_table = Table(global_data, colWidths=[42 * mm, 88 * mm, 88 * mm, 20 * mm], repeatRows=1)
-    global_table.setStyle(TableStyle([
+    global_tbl = LongTable(global_table_data, colWidths=[46 * mm, 90 * mm, 90 * mm, 22 * mm], repeatRows=1)
+    global_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), HexColor("#163A63")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.35, HexColor("#AEBBC9")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F8FBFD")]),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("ALIGN", (-1, 1), (-1, -1), "CENTER"),
+        ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#9FB2C8")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D3DDE8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story.append(global_table)
+    story.append(global_tbl)
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("Structural sanity check", styles["HeadX"]))
+    story.append(Paragraph("Structural Sanity Check", styles["HeadX"]))
     for line in sanity_lines:
-        story.append(Paragraph("&bull; " + line, styles["BodyX"]))
+        story.append(Paragraph("• " + line, styles["BodyX"]))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Engineering conclusion", styles["HeadX"]))
+    story.append(Paragraph("Engineering Conclusion", styles["HeadX"]))
     for line in conclusion_lines:
-        story.append(Paragraph("&bull; " + line, styles["BodyX"]))
-    story.append(Spacer(1, 8))
+        story.append(Paragraph("• " + line, styles["BodyX"]))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must verify zone locations, detailing, and any additional reinforcement notes on the full drawing set.", styles["SmallX"]))
 
-    story.append(Paragraph("Disclaimer", styles["HeadX"]))
-    story.append(Paragraph(
-        "This automated report is conceptual and educational. Verification by a qualified engineer remains mandatory.",
-        styles["SmallX"],
-    ))
+    doc.build(story)
+    pdf_buffer.seek(0)
+    return pdf_buffer
 
-    def add_page_footer(canvas, pdf_doc):
-        canvas.saveState()
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(HexColor("#666666"))
-        canvas.drawRightString(pdf_doc.pagesize[0] - pdf_doc.rightMargin, 8 * mm, f"Page {canvas.getPageNumber()}")
-        canvas.drawString(pdf_doc.leftMargin, 8 * mm, "Predal reinforcement verification - A3 landscape")
-        canvas.restoreState()
 
-    doc.build(story, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
-
-@app.get("/")
+@app.route("/", methods=["GET"])
 def index():
     return render_template_string(INDEX_HTML)
 
 
-@app.get("/healthz")
+@app.route("/healthz", methods=["GET"])
 def healthz():
-    return {"status": "ok"}, 200
+    return "ok", 200
 
-@app.post("/generate")
+
+@app.route("/generate", methods=["POST"])
 def generate():
     design_file = request.files.get("design_pdf")
     supplier_file = request.files.get("supplier_pdf")
-    project_title = request.form.get("project_title", "").strip()
+    project_title = (request.form.get("project_title") or "").strip()
 
     if not design_file or not supplier_file:
         return "Both PDF files are required.", 400
 
+    import tempfile
+
     with tempfile.TemporaryDirectory() as temp_dir:
         design_path = os.path.join(temp_dir, "design.pdf")
         supplier_path = os.path.join(temp_dir, "supplier.pdf")
-        output_path = os.path.join(temp_dir, "Predal_Reinforcement_Verification_Report.pdf")
-
         design_file.save(design_path)
         supplier_file.save(supplier_path)
 
         design = extract_design_data(design_path)
         supplier = extract_supplier_data(supplier_path)
-        build_report(design, supplier, output_path, project_title=project_title)
 
-        with open(output_path, "rb") as f:
-            pdf_bytes = f.read()
+        if not supplier["rows"]:
+            return (
+                "No supplier plates could be parsed from the supplier PDF. "
+                f"Detected parser: {supplier.get('supplier_format', 'unknown')}. "
+                "Try a cleaner PDF export or update the parser for this supplier layout."
+            ), 400
 
-    return send_file(
-        io.BytesIO(pdf_bytes),
-        as_attachment=True,
-        download_name="Predal_Reinforcement_Verification_Report.pdf",
-        mimetype="application/pdf",
-    )
+        pdf_buffer = build_report_pdf_bytes(design, supplier, project_title=project_title)
+        return send_file(
+            pdf_buffer,
+            as_attachment=True,
+            download_name="Predal_Reinforcement_Verification_Report.pdf",
+            mimetype="application/pdf",
+        )
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(debug=True)
