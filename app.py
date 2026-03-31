@@ -12,7 +12,8 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import Image as RLImage, LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
@@ -49,7 +50,7 @@ INDEX_HTML = """
       min-height:100vh;
     }
     .page{
-      max-width:1080px;
+      max-width:1120px;
       margin:36px auto;
       padding:0 20px;
     }
@@ -102,7 +103,7 @@ INDEX_HTML = """
     }
     .hero p{
       margin:12px 0 0;
-      max-width:700px;
+      max-width:760px;
       font-size:17px;
       line-height:1.5;
       color:rgba(255,255,255,.92);
@@ -164,7 +165,7 @@ INDEX_HTML = """
     }
     .upload-grid{
       display:grid;
-      grid-template-columns:1fr 1fr;
+      grid-template-columns:repeat(3, 1fr);
       gap:18px;
       margin-top:8px;
     }
@@ -184,6 +185,11 @@ INDEX_HTML = """
     .upload-card h3{
       margin:0 0 12px;
       font-size:16px;
+    }
+    .upload-card p{
+      margin:0 0 12px;
+      color:var(--muted);
+      font-size:13px;
     }
     .dropzone{
       display:flex;
@@ -246,6 +252,7 @@ INDEX_HTML = """
       justify-content:space-between;
       gap:16px;
       margin-top:24px;
+      flex-wrap:wrap;
     }
     .subtle{
       color:var(--muted);
@@ -256,7 +263,7 @@ INDEX_HTML = """
       border:none;
       border-radius:16px;
       padding:15px 22px;
-      min-width:220px;
+      min-width:230px;
       background:linear-gradient(135deg,var(--primary) 0%, var(--primary-2) 100%);
       color:#fff;
       font-size:15px;
@@ -265,20 +272,11 @@ INDEX_HTML = """
       box-shadow:0 12px 24px rgba(21,58,99,.22);
       transition:transform .18s ease, box-shadow .18s ease, opacity .18s ease;
     }
-    .btn:hover{
-      transform:translateY(-1px);
-      box-shadow:0 16px 30px rgba(21,58,99,.25);
-    }
-    .btn:disabled{
-      opacity:.78;
-      cursor:wait;
-    }
-    @media (max-width: 860px){
-      .top-row,
+    .btn:hover{transform:translateY(-1px); box-shadow:0 15px 28px rgba(21,58,99,.28)}
+    .btn:disabled{opacity:.72; cursor:not-allowed; transform:none}
+    @media (max-width: 980px){
+      .top-row{grid-template-columns:1fr}
       .upload-grid{grid-template-columns:1fr}
-      .hero h1{font-size:32px}
-      .actions{flex-direction:column; align-items:stretch}
-      .btn{width:100%}
     }
   </style>
 </head>
@@ -289,7 +287,7 @@ INDEX_HTML = """
         <div class="hero-inner">
           <div class="badge">A3 PDF Report</div>
           <h1>Predal Reinforcement Verifier</h1>
-          <p>Upload the structural design PDF and the supplier Predal PDF to generate a clean verification report.</p>
+          <p>Upload the structural design PDF, the supplier Predal PDF, and optionally your company logo to generate a clean verification report.</p>
         </div>
       </div>
 
@@ -302,8 +300,8 @@ INDEX_HTML = """
             </div>
             <div class="mini-card">
               <div>
-                <strong>2 PDFs in</strong>
-                <span>1 A3 verification report out</span>
+                <strong>2 PDFs + optional logo</strong>
+                <span>1 polished A3 verification report out</span>
               </div>
             </div>
           </div>
@@ -311,6 +309,7 @@ INDEX_HTML = """
           <div class="upload-grid">
             <div class="upload-card">
               <h3>Structural design PDF</h3>
+              <p>Required</p>
               <label class="dropzone" for="design_pdf" id="designDrop">
                 <div class="icon">📐</div>
                 <strong>Choose or drop file</strong>
@@ -322,6 +321,7 @@ INDEX_HTML = """
 
             <div class="upload-card">
               <h3>Supplier Predal PDF</h3>
+              <p>Required</p>
               <label class="dropzone" for="supplier_pdf" id="supplierDrop">
                 <div class="icon">🏗️</div>
                 <strong>Choose or drop file</strong>
@@ -330,10 +330,22 @@ INDEX_HTML = """
               <input class="hidden-input" type="file" id="supplier_pdf" name="supplier_pdf" accept="application/pdf,.pdf" required>
               <div class="file-meta" id="supplierMeta">No file selected</div>
             </div>
+
+            <div class="upload-card">
+              <h3>Company logo</h3>
+              <p>Optional</p>
+              <label class="dropzone" for="company_logo" id="logoDrop">
+                <div class="icon">🖼️</div>
+                <strong>Choose or drop file</strong>
+                <span>PNG or JPG. Added to the PDF top-left corner.</span>
+              </label>
+              <input class="hidden-input" type="file" id="company_logo" name="company_logo" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
+              <div class="file-meta" id="logoMeta">No logo selected</div>
+            </div>
           </div>
 
           <div class="actions">
-            <div class="subtle">Upload both files and generate the report.</div>
+            <div class="subtle">Upload both PDFs. The logo is optional.</div>
             <button class="btn" id="submitBtn" type="submit">Generate verification PDF</button>
           </div>
         </form>
@@ -342,7 +354,7 @@ INDEX_HTML = """
   </div>
 
   <script>
-    function bindDropzone(inputId, metaId, zoneId){
+    function bindDropzone(inputId, metaId, zoneId, mode){
       const input = document.getElementById(inputId);
       const meta = document.getElementById(metaId);
       const zone = document.getElementById(zoneId);
@@ -352,7 +364,7 @@ INDEX_HTML = """
           meta.textContent = file.name;
           meta.classList.add("ready");
         }else{
-          meta.textContent = "No file selected";
+          meta.textContent = mode === "logo" ? "No logo selected" : "No file selected";
           meta.classList.remove("ready");
         }
       }
@@ -381,8 +393,11 @@ INDEX_HTML = """
         const file = e.dataTransfer.files && e.dataTransfer.files[0] ? e.dataTransfer.files[0] : null;
         if(!file){ return; }
         const lower = file.name.toLowerCase();
-        if(!(lower.endsWith(".pdf") || file.type === "application/pdf")){
-          meta.textContent = "Please use a PDF file";
+        const ok = mode === "logo"
+          ? (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || file.type === "image/png" || file.type === "image/jpeg")
+          : (lower.endsWith(".pdf") || file.type === "application/pdf");
+        if(!ok){
+          meta.textContent = mode === "logo" ? "Please use PNG or JPG" : "Please use a PDF file";
           meta.classList.remove("ready");
           return;
         }
@@ -393,8 +408,9 @@ INDEX_HTML = """
       });
     }
 
-    bindDropzone("design_pdf", "designMeta", "designDrop");
-    bindDropzone("supplier_pdf", "supplierMeta", "supplierDrop");
+    bindDropzone("design_pdf", "designMeta", "designDrop", "pdf");
+    bindDropzone("supplier_pdf", "supplierMeta", "supplierDrop", "pdf");
+    bindDropzone("company_logo", "logoMeta", "logoDrop", "logo");
 
     document.getElementById("verifyForm").addEventListener("submit", function(){
       const btn = document.getElementById("submitBtn");
@@ -933,7 +949,7 @@ def extract_supplier_data(pdf_path):
     return data
 
 
-def build_report_pdf_bytes(design, supplier, project_title=""):
+def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None):
     rows = supplier["rows"]
     design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
 
@@ -1041,9 +1057,26 @@ def build_report_pdf_bytes(design, supplier, project_title=""):
         pagesize=landscape(A3),
         leftMargin=14 * mm,
         rightMargin=14 * mm,
-        topMargin=12 * mm,
+        topMargin=(24 * mm if logo_path else 12 * mm),
         bottomMargin=12 * mm,
     )
+
+    def _draw_logo(canvas, doc_obj):
+        if not logo_path:
+            return
+        try:
+            reader = ImageReader(logo_path)
+            iw, ih = reader.getSize()
+            max_w = 42 * mm
+            max_h = 14 * mm
+            scale = min(max_w / float(iw), max_h / float(ih), 1.0)
+            draw_w = iw * scale
+            draw_h = ih * scale
+            x = doc.leftMargin
+            y = doc_obj.pagesize[1] - draw_h - 8 * mm
+            canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+        except Exception:
+            pass
 
     title = project_title.strip() or "Predal reinforcement verification"
     story = []
@@ -1144,7 +1177,7 @@ def build_report_pdf_bytes(design, supplier, project_title=""):
     story.append(Spacer(1, 6))
     story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must verify zone locations, detailing, and any additional reinforcement notes on the full drawing set.", styles["SmallX"]))
 
-    doc.build(story)
+    doc.build(story, onFirstPage=_draw_logo, onLaterPages=_draw_logo)
     pdf_buffer.seek(0)
     return pdf_buffer
 
@@ -1163,6 +1196,7 @@ def healthz():
 def generate():
     design_file = request.files.get("design_pdf")
     supplier_file = request.files.get("supplier_pdf")
+    logo_file = request.files.get("company_logo")
     project_title = (request.form.get("project_title") or "").strip()
 
     if not design_file or not supplier_file:
@@ -1176,6 +1210,14 @@ def generate():
         design_file.save(design_path)
         supplier_file.save(supplier_path)
 
+        logo_path = None
+        if logo_file and getattr(logo_file, "filename", ""):
+            ext = os.path.splitext(logo_file.filename)[1].lower()
+            if ext not in {".png", ".jpg", ".jpeg"}:
+                return "Logo must be a PNG or JPG image.", 400
+            logo_path = os.path.join(temp_dir, f"company_logo{ext}")
+            logo_file.save(logo_path)
+
         supplier = extract_supplier_data(supplier_path)
         design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
 
@@ -1186,7 +1228,7 @@ def generate():
                 "Try a cleaner PDF export or update the parser for this supplier layout."
             ), 400
 
-        pdf_buffer = build_report_pdf_bytes(design, supplier, project_title=project_title)
+        pdf_buffer = build_report_pdf_bytes(design, supplier, project_title=project_title, logo_path=logo_path)
         return send_file(
             pdf_buffer,
             as_attachment=True,
