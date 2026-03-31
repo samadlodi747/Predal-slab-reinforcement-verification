@@ -1039,14 +1039,23 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     is_landscape = (report_orientation or "landscape").lower() != "portrait"
     page_size = landscape(A3) if is_landscape else A3
 
+    PREMIUM_NAVY = HexColor("#12263A")
+    PREMIUM_GOLD = HexColor("#C9A96E")
+    PREMIUM_BORDER = HexColor("#E2D8C7")
+    PREMIUM_ROW = HexColor("#F8F3EA")
+    PREMIUM_CHIP = HexColor("#F3ECE0")
+    PREMIUM_TEXT = HexColor("#2C3440")
+    PREMIUM_MUTED = HexColor("#6F7782")
+    PREMIUM_PAGE = HexColor("#FBFAF7")
+
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=22 if is_landscape else 20, leading=26 if is_landscape else 24, textColor=HexColor("#173F6B"), spaceAfter=4))
-    styles.add(ParagraphStyle(name="ReportSub", parent=styles["Normal"], fontName="Helvetica", fontSize=11, leading=14, textColor=HexColor("#4E6076")))
-    styles.add(ParagraphStyle(name="SectionHead", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=14 if is_landscape else 13, leading=17, textColor=HexColor("#173F6B"), spaceAfter=6, spaceBefore=8))
-    styles.add(ParagraphStyle(name="BodyX", parent=styles["Normal"], fontName="Helvetica", fontSize=10 if is_landscape else 9.2, leading=13 if is_landscape else 12))
-    styles.add(ParagraphStyle(name="SmallX", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=10.5, textColor=HexColor("#5B6C80")))
-    styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=9.2 if is_landscape else 8.4, leading=11.2 if is_landscape else 10.2, textColor=HexColor("#162133")))
-    styles.add(ParagraphStyle(name="TableHead", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.6 if is_landscape else 8.8, leading=11.6 if is_landscape else 10.8, textColor=colors.white))
+    styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=24 if is_landscape else 22, leading=29 if is_landscape else 26, textColor=PREMIUM_NAVY, spaceAfter=4))
+    styles.add(ParagraphStyle(name="ReportSub", parent=styles["Normal"], fontName="Helvetica", fontSize=11.3, leading=14.4, textColor=PREMIUM_TEXT))
+    styles.add(ParagraphStyle(name="SectionHead", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=15 if is_landscape else 13.6, leading=18 if is_landscape else 16.4, textColor=PREMIUM_NAVY, spaceAfter=0, spaceBefore=0))
+    styles.add(ParagraphStyle(name="BodyX", parent=styles["Normal"], fontName="Helvetica", fontSize=10.2 if is_landscape else 9.4, leading=13.4 if is_landscape else 12.4, textColor=PREMIUM_TEXT))
+    styles.add(ParagraphStyle(name="SmallX", parent=styles["Normal"], fontName="Helvetica", fontSize=8.7, leading=10.9, textColor=PREMIUM_MUTED))
+    styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=9.4 if is_landscape else 8.6, leading=11.5 if is_landscape else 10.5, textColor=PREMIUM_TEXT))
+    styles.add(ParagraphStyle(name="TableHead", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.8 if is_landscape else 9.0, leading=12 if is_landscape else 11, textColor=colors.white))
 
     pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -1054,18 +1063,24 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         pagesize=page_size,
         leftMargin=15 * mm,
         rightMargin=15 * mm,
-        topMargin=(28 * mm if logo_path else 20 * mm),
+        topMargin=(30 * mm if logo_path else 22 * mm),
         bottomMargin=14 * mm,
     )
 
     def _draw_common_frame(canvas, doc_obj):
         w, h = doc_obj.pagesize
         canvas.saveState()
-        canvas.setStrokeColor(HexColor("#D8E4F1"))
-        canvas.setLineWidth(0.6)
+        canvas.setFillColor(PREMIUM_PAGE)
+        canvas.rect(0, 0, w, h, stroke=0, fill=1)
+        canvas.setFillColor(PREMIUM_NAVY)
+        canvas.rect(0, h - 6.5 * mm, w, 6.5 * mm, stroke=0, fill=1)
+        canvas.setFillColor(PREMIUM_GOLD)
+        canvas.rect(w - 58 * mm, h - 6.5 * mm, 58 * mm, 6.5 * mm, stroke=0, fill=1)
+        canvas.setStrokeColor(PREMIUM_BORDER)
+        canvas.setLineWidth(0.75)
         canvas.line(doc.leftMargin, 13 * mm, w - doc.rightMargin, 13 * mm)
-        canvas.setFont("Helvetica", 8.5)
-        canvas.setFillColor(HexColor("#6A7B90"))
+        canvas.setFont("Helvetica", 8.7)
+        canvas.setFillColor(PREMIUM_MUTED)
         canvas.drawRightString(w - doc.rightMargin, 8.5 * mm, f"Page {canvas.getPageNumber()}")
         canvas.restoreState()
 
@@ -1077,13 +1092,13 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
             try:
                 reader = ImageReader(logo_path)
                 iw, ih = reader.getSize()
-                max_w = 86 * mm
-                max_h = 26 * mm
+                max_w = 92 * mm
+                max_h = 28 * mm
                 scale = min(max_w / float(iw), max_h / float(ih), 1.0)
                 draw_w = iw * scale
                 draw_h = ih * scale
                 x = w - doc.rightMargin - draw_w
-                y = h - draw_h - 8.0 * mm
+                y = h - draw_h - 8.5 * mm
                 canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
             except Exception:
                 pass
@@ -1093,14 +1108,42 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         _draw_common_frame(canvas, doc_obj)
 
     title = project_title.strip() or "Predal reinforcement verification"
-    story = []
-    story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
-    story.append(Paragraph(f"Project: {title}", styles["ReportSub"]))
-    if report_date_str:
-        story.append(Paragraph(f"Date: {report_date_str}", styles["ReportSub"]))
-    story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Predal Reinforcement Comparison", styles["SectionHead"]))
+    def _section_chip(text):
+        chip = LongTable([[Paragraph(text, styles["SectionHead"])]], colWidths=[doc.width])
+        chip.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), PREMIUM_CHIP),
+            ("BOX", (0, 0), (-1, -1), 0.65, PREMIUM_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        return chip
+    story = []
+    story.append(Spacer(1, 4))
+    story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
+
+    meta_rows = [[Paragraph(f"<b>Project</b>: {title}", styles["ReportSub"])]]
+    if report_date_str:
+        meta_rows[0].append(Paragraph(f"<b>Date</b>: {report_date_str}", styles["ReportSub"]))
+    else:
+        meta_rows[0].append(Paragraph("<b>Date</b>: -", styles["ReportSub"]))
+    meta_tbl = LongTable(meta_rows, colWidths=[doc.width * 0.68, doc.width * 0.32])
+    meta_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.70, PREMIUM_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(meta_tbl)
+    story.append(Spacer(1, 10))
+
+    story.append(_section_chip("Predal Reinforcement Comparison"))
+    story.append(Spacer(1, 5))
 
     if is_landscape:
         comp_col_widths = [22 * mm, 58 * mm, 122 * mm, 132 * mm, 28 * mm]
@@ -1121,14 +1164,14 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
 
     comp_tbl = LongTable(comp_table_data, colWidths=comp_col_widths, repeatRows=1)
     comp_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#173F6B")),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.8, HexColor("#1FA0A0")),
+        ("BACKGROUND", (0, 0), (-1, 0), PREMIUM_NAVY),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, PREMIUM_GOLD),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOX", (0, 0), (-1, -1), 0.55, HexColor("#AEC0D4")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D5E0EC")),
+        ("BOX", (0, 0), (-1, -1), 0.55, PREMIUM_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PREMIUM_ROW]),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 5.5),
@@ -1143,7 +1186,8 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(comp_tbl)
 
     story.append(PageBreak())
-    story.append(Paragraph("Global Parameter Comparison", styles["SectionHead"]))
+    story.append(_section_chip("Global Parameter Comparison"))
+    story.append(Spacer(1, 5))
     global_table_data = [[
         Paragraph("Parameter", styles["TableHead"]),
         Paragraph("Design requirement", styles["TableHead"]),
@@ -1155,13 +1199,13 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
 
     global_tbl = LongTable(global_table_data, colWidths=global_col_widths, repeatRows=1)
     global_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#173F6B")),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.8, HexColor("#1FA0A0")),
+        ("BACKGROUND", (0, 0), (-1, 0), PREMIUM_NAVY),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, PREMIUM_GOLD),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("BOX", (0, 0), (-1, -1), 0.55, HexColor("#AEC0D4")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D5E0EC")),
+        ("BOX", (0, 0), (-1, -1), 0.55, PREMIUM_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PREMIUM_ROW]),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 5.5),
@@ -1174,15 +1218,17 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(global_tbl)
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("Structural Sanity Check", styles["SectionHead"]))
+    story.append(_section_chip("Structural Sanity Check"))
+    story.append(Spacer(1, 5))
     for line in sanity_lines:
         story.append(Paragraph("• " + line, styles["BodyX"]))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Engineering Conclusion", styles["SectionHead"]))
+    story.append(_section_chip("Engineering Conclusion"))
+    story.append(Spacer(1, 5))
     for line in conclusion_lines:
         story.append(Paragraph("• " + line, styles["BodyX"]))
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 8))
     story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must still verify zone locations, detailing, and sheet-specific notes before approval.", styles["SmallX"]))
 
     doc.build(story, onFirstPage=_draw_first_page, onLaterPages=_draw_later_pages)
