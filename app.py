@@ -27,75 +27,381 @@ INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Predal Reinforcement Verifier</title>
   <style>
-    body { font-family: Arial, sans-serif; background:#f5f7fb; color:#1c2430; margin:0; }
-    .wrap { max-width: 980px; margin: 32px auto; background:#fff; border:1px solid #d9e2ec; border-radius:16px; box-shadow:0 12px 28px rgba(0,0,0,.05); overflow:hidden; }
-    .hero { padding: 28px 32px; background:#163A63; color:#fff; }
-    .hero h1 { margin:0 0 8px; font-size:28px; }
-    .hero p { margin:0; line-height:1.45; opacity:.95; }
-    .body { padding: 28px 32px; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
-    .field { margin-bottom:18px; }
-    label { display:block; font-weight:700; margin-bottom:8px; }
-    input[type="text"], input[type="file"] {
-      width:100%; box-sizing:border-box; border:1px solid #c8d4e3; border-radius:10px;
-      padding:12px 14px; background:#fff;
+    :root{
+      --bg:#eef3f9;
+      --card:#ffffff;
+      --line:#d7e1ee;
+      --text:#142033;
+      --muted:#617189;
+      --primary:#153a63;
+      --primary-2:#21558d;
+      --soft:#f7fafd;
+      --shadow:0 18px 45px rgba(16,32,58,.10);
+      --radius:22px;
     }
-    .note {
-      background:#f3f7fb; border-left:4px solid #4a6fa1; padding:14px 16px; border-radius:8px; line-height:1.45; margin:18px 0;
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0}
+    body{
+      font-family:Arial,sans-serif;
+      color:var(--text);
+      background:
+        radial-gradient(circle at top left, #f8fbff 0, #eef3f9 36%, #e9eff7 100%);
+      min-height:100vh;
     }
-    button {
-      background:#163A63; color:#fff; border:none; border-radius:10px; padding:12px 18px;
-      font-size:15px; font-weight:700; cursor:pointer;
+    .page{
+      max-width:1080px;
+      margin:36px auto;
+      padding:0 20px;
     }
-    button:hover { background:#1d4a7d; }
-    ul { margin:10px 0 0 18px; line-height:1.5; }
-    .footer { color:#5a6b7f; font-size:13px; margin-top:14px; }
-    code { background:#eef3f8; padding:2px 6px; border-radius:6px; }
-    @media (max-width: 760px) { .grid { grid-template-columns:1fr; } }
+    .shell{
+      background:rgba(255,255,255,.78);
+      border:1px solid rgba(215,225,238,.95);
+      border-radius:28px;
+      overflow:hidden;
+      box-shadow:var(--shadow);
+      backdrop-filter: blur(14px);
+    }
+    .hero{
+      position:relative;
+      padding:34px 34px 28px;
+      background:
+        linear-gradient(135deg, rgba(21,58,99,1) 0%, rgba(33,85,141,1) 100%);
+      color:#fff;
+      overflow:hidden;
+    }
+    .hero:before,
+    .hero:after{
+      content:"";
+      position:absolute;
+      border-radius:999px;
+      background:rgba(255,255,255,.08);
+      filter:blur(2px);
+    }
+    .hero:before{width:280px;height:280px;right:-90px;top:-120px}
+    .hero:after{width:220px;height:220px;left:-60px;bottom:-120px}
+    .hero-inner{position:relative;z-index:1}
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 12px;
+      border:1px solid rgba(255,255,255,.18);
+      border-radius:999px;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:.04em;
+      text-transform:uppercase;
+      background:rgba(255,255,255,.08);
+      margin-bottom:14px;
+    }
+    .hero h1{
+      margin:0;
+      font-size:40px;
+      line-height:1.06;
+      font-weight:800;
+    }
+    .hero p{
+      margin:12px 0 0;
+      max-width:700px;
+      font-size:17px;
+      line-height:1.5;
+      color:rgba(255,255,255,.92);
+    }
+    .body{padding:30px}
+    .top-row{
+      display:grid;
+      grid-template-columns:1.1fr .9fr;
+      gap:18px;
+      margin-bottom:18px;
+    }
+    .field-card,
+    .mini-card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:20px;
+      padding:18px;
+      box-shadow:0 8px 24px rgba(14,25,42,.04);
+    }
+    .mini-card{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+      min-height:100%;
+      background:linear-gradient(180deg,#ffffff 0%, #f9fbfe 100%);
+    }
+    .mini-card strong{
+      display:block;
+      font-size:20px;
+      margin-bottom:6px;
+    }
+    .mini-card span{
+      color:var(--muted);
+      font-size:14px;
+      line-height:1.45;
+    }
+    label{
+      display:block;
+      font-size:14px;
+      font-weight:700;
+      margin-bottom:10px;
+    }
+    .text-input{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px 16px;
+      font-size:15px;
+      color:var(--text);
+      background:#fbfdff;
+      outline:none;
+      transition:border-color .18s ease, box-shadow .18s ease, background .18s ease;
+    }
+    .text-input:focus{
+      border-color:#8fb2da;
+      box-shadow:0 0 0 4px rgba(33,85,141,.10);
+      background:#fff;
+    }
+    .upload-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:18px;
+      margin-top:8px;
+    }
+    .upload-card{
+      position:relative;
+      border:1px solid var(--line);
+      border-radius:22px;
+      padding:18px;
+      background:linear-gradient(180deg,#ffffff 0%, #f9fbfe 100%);
+      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    .upload-card:hover{
+      transform:translateY(-1px);
+      border-color:#a9c1df;
+      box-shadow:0 10px 24px rgba(17,38,66,.06);
+    }
+    .upload-card h3{
+      margin:0 0 12px;
+      font-size:16px;
+    }
+    .dropzone{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+      min-height:190px;
+      border:1.5px dashed #b3c6dd;
+      border-radius:18px;
+      background:#fbfdff;
+      padding:20px;
+      cursor:pointer;
+      transition:border-color .18s ease, background .18s ease, transform .18s ease;
+    }
+    .dropzone:hover{
+      background:#f6faff;
+      border-color:#6f96c3;
+      transform:translateY(-1px);
+    }
+    .dropzone.active{
+      background:#eef6ff;
+      border-color:#21558d;
+    }
+    .icon{
+      width:54px;
+      height:54px;
+      border-radius:16px;
+      display:grid;
+      place-items:center;
+      margin-bottom:12px;
+      font-size:24px;
+      background:#eaf2fb;
+      color:var(--primary);
+    }
+    .dropzone strong{
+      display:block;
+      font-size:16px;
+      margin-bottom:6px;
+    }
+    .dropzone span{
+      display:block;
+      font-size:13px;
+      line-height:1.45;
+      color:var(--muted);
+      max-width:240px;
+    }
+    .hidden-input{display:none}
+    .file-meta{
+      margin-top:12px;
+      min-height:22px;
+      font-size:14px;
+      color:var(--muted);
+      word-break:break-word;
+    }
+    .file-meta.ready{color:#1d5b38;font-weight:700}
+    .actions{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+      margin-top:24px;
+    }
+    .subtle{
+      color:var(--muted);
+      font-size:13px;
+    }
+    .btn{
+      appearance:none;
+      border:none;
+      border-radius:16px;
+      padding:15px 22px;
+      min-width:220px;
+      background:linear-gradient(135deg,var(--primary) 0%, var(--primary-2) 100%);
+      color:#fff;
+      font-size:15px;
+      font-weight:800;
+      cursor:pointer;
+      box-shadow:0 12px 24px rgba(21,58,99,.22);
+      transition:transform .18s ease, box-shadow .18s ease, opacity .18s ease;
+    }
+    .btn:hover{
+      transform:translateY(-1px);
+      box-shadow:0 16px 30px rgba(21,58,99,.25);
+    }
+    .btn:disabled{
+      opacity:.78;
+      cursor:wait;
+    }
+    @media (max-width: 860px){
+      .top-row,
+      .upload-grid{grid-template-columns:1fr}
+      .hero h1{font-size:32px}
+      .actions{flex-direction:column; align-items:stretch}
+      .btn{width:100%}
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="hero">
-      <h1>Predal Reinforcement Verifier</h1>
-      <p>Upload a structural design Predal reinforcement PDF and a supplier Predal legplan/shop drawing PDF. The app generates an A3 landscape verification report in PDF format.</p>
-    </div>
-    <div class="body">
-      <form method="post" action="/generate" enctype="multipart/form-data">
-        <div class="field">
-          <label for="project_title">Project title (optional)</label>
-          <input type="text" id="project_title" name="project_title" placeholder="Example: 50 appartementen Abeelstraat - Blok A - Afdek +1">
+  <div class="page">
+    <div class="shell">
+      <div class="hero">
+        <div class="hero-inner">
+          <div class="badge">A3 PDF Report</div>
+          <h1>Predal Reinforcement Verifier</h1>
+          <p>Upload the structural design PDF and the supplier Predal PDF to generate a clean verification report.</p>
         </div>
-        <div class="grid">
-          <div class="field">
-            <label for="design_pdf">Structural design PDF</label>
-            <input type="file" id="design_pdf" name="design_pdf" accept="application/pdf" required>
+      </div>
+
+      <div class="body">
+        <form id="verifyForm" method="post" action="/generate" enctype="multipart/form-data">
+          <div class="top-row">
+            <div class="field-card">
+              <label for="project_title">Project title</label>
+              <input class="text-input" type="text" id="project_title" name="project_title" placeholder="Example: 50 appartementen Abeelstraat - Blok A - Afdek +1">
+            </div>
+            <div class="mini-card">
+              <div>
+                <strong>2 PDFs in</strong>
+                <span>1 A3 verification report out</span>
+              </div>
+            </div>
           </div>
-          <div class="field">
-            <label for="supplier_pdf">Supplier Predal PDF</label>
-            <input type="file" id="supplier_pdf" name="supplier_pdf" accept="application/pdf" required>
+
+          <div class="upload-grid">
+            <div class="upload-card">
+              <h3>Structural design PDF</h3>
+              <label class="dropzone" for="design_pdf" id="designDrop">
+                <div class="icon">📐</div>
+                <strong>Choose or drop file</strong>
+                <span>PDF only</span>
+              </label>
+              <input class="hidden-input" type="file" id="design_pdf" name="design_pdf" accept="application/pdf,.pdf" required>
+              <div class="file-meta" id="designMeta">No file selected</div>
+            </div>
+
+            <div class="upload-card">
+              <h3>Supplier Predal PDF</h3>
+              <label class="dropzone" for="supplier_pdf" id="supplierDrop">
+                <div class="icon">🏗️</div>
+                <strong>Choose or drop file</strong>
+                <span>PDF only</span>
+              </label>
+              <input class="hidden-input" type="file" id="supplier_pdf" name="supplier_pdf" accept="application/pdf,.pdf" required>
+              <div class="file-meta" id="supplierMeta">No file selected</div>
+            </div>
           </div>
-        </div>
 
-        <div class="note">
-          <strong>Multi-supplier parsing</strong>
-          <ul>
-            <li>Supplier format is auto-detected where possible.</li>
-            <li>Dedicated parsers are included for tabular Predalco / IBO-type sheets and Oeterbeton / drawing-embedded sheets.</li>
-            <li>A generic drawing fallback tries to read plate labels, plate sizes, and reinforcement labels from spatial PDF text blocks.</li>
-          </ul>
-        </div>
-
-        <div class="note">
-          <strong>Important engineering limitation</strong><br>
-          If the design PDF does not expose reinforcement zones as machine-readable plate-by-plate data, the tool falls back to <em>reinforcement-family matching + sanity checks</em>. Visual zone overlay still needs engineer review before final approval.
-        </div>
-
-        <button type="submit">Generate verification PDF</button>
-        <div class="footer">Dependencies: Flask, PyMuPDF, ReportLab</div>
-      </form>
+          <div class="actions">
+            <div class="subtle">Upload both files and generate the report.</div>
+            <button class="btn" id="submitBtn" type="submit">Generate verification PDF</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
+
+  <script>
+    function bindDropzone(inputId, metaId, zoneId){
+      const input = document.getElementById(inputId);
+      const meta = document.getElementById(metaId);
+      const zone = document.getElementById(zoneId);
+
+      function setMeta(file){
+        if(file){
+          meta.textContent = file.name;
+          meta.classList.add("ready");
+        }else{
+          meta.textContent = "No file selected";
+          meta.classList.remove("ready");
+        }
+      }
+
+      input.addEventListener("change", function(){
+        setMeta(this.files && this.files[0] ? this.files[0] : null);
+      });
+
+      ["dragenter","dragover"].forEach(evt => {
+        zone.addEventListener(evt, function(e){
+          e.preventDefault();
+          e.stopPropagation();
+          zone.classList.add("active");
+        });
+      });
+
+      ["dragleave","drop"].forEach(evt => {
+        zone.addEventListener(evt, function(e){
+          e.preventDefault();
+          e.stopPropagation();
+          zone.classList.remove("active");
+        });
+      });
+
+      zone.addEventListener("drop", function(e){
+        const file = e.dataTransfer.files && e.dataTransfer.files[0] ? e.dataTransfer.files[0] : null;
+        if(!file){ return; }
+        const lower = file.name.toLowerCase();
+        if(!(lower.endsWith(".pdf") || file.type === "application/pdf")){
+          meta.textContent = "Please use a PDF file";
+          meta.classList.remove("ready");
+          return;
+        }
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        setMeta(file);
+      });
+    }
+
+    bindDropzone("design_pdf", "designMeta", "designDrop");
+    bindDropzone("supplier_pdf", "supplierMeta", "supplierDrop");
+
+    document.getElementById("verifyForm").addEventListener("submit", function(){
+      const btn = document.getElementById("submitBtn");
+      btn.disabled = true;
+      btn.textContent = "Generating PDF...";
+    });
+  </script>
 </body>
 </html>
 """
