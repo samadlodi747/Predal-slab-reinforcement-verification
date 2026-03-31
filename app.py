@@ -1218,12 +1218,6 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(global_tbl)
     story.append(Spacer(1, 10))
 
-    story.append(_section_chip("Structural Sanity Check"))
-    story.append(Spacer(1, 5))
-    for line in sanity_lines:
-        story.append(Paragraph("• " + line, styles["BodyX"]))
-    story.append(Spacer(1, 8))
-
     story.append(_section_chip("Engineering Conclusion"))
     story.append(Spacer(1, 5))
     for line in conclusion_lines:
