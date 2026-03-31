@@ -131,6 +131,106 @@ def normalize_storey_key(text):
     return None
 
 
+
+
+def _bbox_union(blocks):
+    xs0 = [b[0] for b in blocks]
+    ys0 = [b[1] for b in blocks]
+    xs1 = [b[2] for b in blocks]
+    ys1 = [b[3] for b in blocks]
+    return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+def _bbox_expand(bbox, dx=180, dy=180):
+    x0, y0, x1, y1 = bbox
+    return (x0 - dx, y0 - dy, x1 + dx, y1 + dy)
+
+def _bbox_intersects(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return not (ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0)
+
+def _most_common(items):
+    if not items:
+        return None
+    counts = {}
+    for item in items:
+        counts[item] = counts.get(item, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))[0][0]
+
+def _storey_plate_prefix(storey_hint):
+    if not storey_hint or not storey_hint.startswith("LEVEL_"):
+        return None
+    try:
+        lvl = int(storey_hint.split("_", 1)[1])
+    except Exception:
+        return None
+    if lvl < 0:
+        return None
+    return f"B{lvl}."
+
+def _collect_storey_local_text(pages, storey_hint):
+    if not storey_hint:
+        return ""
+    local_text_parts = []
+
+    if storey_hint == "FOUNDATION":
+        for page in pages:
+            page_text = page["text"]
+            if re.search(r"FUNDERINGSPLAAT|FUNDERING", page_text, re.I):
+                local_text_parts.append(page_text)
+        return "\n".join(local_text_parts)
+
+    prefix = _storey_plate_prefix(storey_hint)
+    if not prefix:
+        return ""
+
+    prefix_re = re.compile(rf"\b{re.escape(prefix)}\d+\b", re.I)
+
+    for page in pages:
+        blocks = page["blocks"]
+        storey_blocks = [b for b in blocks if prefix_re.search(clean_spaces(b[4]))]
+        if not storey_blocks:
+            continue
+        zone = _bbox_expand(_bbox_union(storey_blocks), dx=220, dy=220)
+        local_blocks = [b for b in blocks if _bbox_intersects((b[0], b[1], b[2], b[3]), zone)]
+        local_text_parts.extend(clean_spaces(b[4]) for b in local_blocks if clean_spaces(b[4]))
+
+    return "\n".join(local_text_parts)
+
+
+def _pages_word_text(pages):
+    return " ".join(str(w[4]) for page in pages for w in page.get("words", []))
+
+def _extract_design_total_thickness_mm(text):
+    txt = clean_spaces(text or "")
+    buildup = re.findall(r"Predallen\s+(\d+)\s*\+\s*(\d+)", txt, re.I)
+    totals = [(int(a) + int(b)) * 10 for a, b in buildup]
+    if totals:
+        return _most_common(totals)
+
+    # Prefer bk/ok level differences on predal notes: bk - ok = total slab thickness in cm.
+    diffs = []
+    for m in re.finditer(r"bk\s*:\s*([+\-]?\d+)\s*ok\s*:\s*([+\-]?\d+)\s*Predallen", txt, re.I):
+        try:
+            diff = abs(int(m.group(1)) - int(m.group(2)))
+        except Exception:
+            continue
+        if 5 <= diff <= 60:
+            diffs.append(diff * 10)
+    if diffs:
+        return _most_common(diffs)
+
+    # Fallback: nearby plausible cm value around each Predallen keyword.
+    notes = []
+    for m in re.finditer(r"Predallen", txt, re.I):
+        window = txt[max(0, m.start() - 120): m.end() + 20]
+        nums = [int(n) for n in re.findall(r"\b(\d{1,2})\b", window) if 5 <= int(n) <= 60]
+        if nums:
+            # Take the largest plausible thickness in the local window; avoids picking 8 from B8-150.
+            notes.append(max(nums))
+    if notes:
+        return _most_common(notes) * 10
+    return None
 def _family_pattern():
     return re.compile(
         r"HW\s*([0-9]+(?:[\.,][0-9]+)?)\s*cm[²2]/l[mn]"
@@ -157,16 +257,22 @@ def _parse_design_families_from_text(text):
 
 def extract_design_data(pdf_path, supplier_full_text=None):
     pages, full_text = read_pdf(pdf_path)
+    storey_hint = normalize_storey_key(supplier_full_text or "")
+
+    local_text = _collect_storey_local_text(pages, storey_hint)
+    search_text = local_text or full_text
 
     families = set()
 
-    # Primary extraction: page blocks
-    for page in pages:
-        for block in page["blocks"]:
-            block_text = clean_spaces(block[4])
-            families |= _parse_design_families_from_text(block_text)
+    if local_text:
+        families |= _parse_design_families_from_text(local_text)
 
-    # Fallback extraction: full page text (important when OCR/blocks split or spacing differs like "a 15cm")
+    if not families:
+        for page in pages:
+            for block in page["blocks"]:
+                block_text = clean_spaces(block[4])
+                families |= _parse_design_families_from_text(block_text)
+
     if not families:
         families |= _parse_design_families_from_text(full_text)
 
@@ -183,16 +289,17 @@ def extract_design_data(pdf_path, supplier_full_text=None):
     if steel_match:
         steel = steel_match.group(1).upper()
 
-    mesh_hits = re.findall(r'B\d+-150', full_text, re.I)
+    mesh_hits = re.findall(r'\bB\d+-150\b', search_text, re.I)
     if mesh_hits:
-        top_mesh = sorted({m.upper() for m in mesh_hits})[0]
+        top_mesh = _most_common([m.upper() for m in mesh_hits])
 
     fire_match = re.search(r"Brandweerstand:\s*([^\n]+)", full_text, re.I)
     if fire_match:
         fire_req = clean_spaces(fire_match.group(1))
 
-    slab_notes = sorted(set(re.findall(r"Predallen\s+\d\+\d+", full_text, re.I)))
+    slab_notes = sorted(set(re.findall(r"Predallen\s+\d\s*\+\s*\d+", search_text, re.I)))
     supplier_det_note = "supplier" if re.search(r"Dikte van de predalplaat.*leverancier", full_text, re.I) else None
+    total_thickness_mm = _extract_design_total_thickness_mm(search_text)
 
     return {
         "families": sorted(families),
@@ -203,7 +310,9 @@ def extract_design_data(pdf_path, supplier_full_text=None):
         "slab_notes": slab_notes,
         "supplier_det_note": supplier_det_note,
         "full_text": full_text,
-        "storey_hint": normalize_storey_key(supplier_full_text or ""),
+        "storey_hint": storey_hint,
+        "local_text": local_text,
+        "total_thickness_mm": total_thickness_mm,
     }
 
 
@@ -216,33 +325,43 @@ def detect_supplier_format(full_text):
     return "generic_drawing"
 
 
-def parse_common_supplier_meta(full_text):
+def parse_common_supplier_meta(full_text, word_text=""):
+    combined_text = f"{full_text}\n{word_text}".strip()
+
     concrete = None
-    concrete_matches = re.findall(r"\bC\d+/\d+\b", full_text, re.I)
+    concrete_matches = re.findall(r"\bC\d+/\d+\b", combined_text, re.I)
     if concrete_matches:
         concrete = concrete_matches[0].upper()
 
     steel = None
-    steel_patterns = [
-        r"Wapening\s*:\s*staalkwaliteit\s*([A-Z0-9 ]+(?:of[A-Z0-9 ]+)?)",
-        r"staalkwaliteit\s*(DE\s*500\s*BS|BE\s*500(?:ES|BS)?|BE500(?:ES|BS)?)",
-        r"kwaliteit d[' ]acier\s*(DE\s*500\s*BS|BE\s*500(?:ES|BS)?)",
-    ]
-    for pat in steel_patterns:
-        m = re.search(pat, full_text, re.I)
-        if m:
-            steel = clean_spaces(m.group(1)).upper().replace(" ", "")
-            break
+    m = re.search(r"\b(DE\s*500\s*BS|BE\s*500(?:ES|BS|TS)?|BE500(?:ES|BS|TS)?)\b", combined_text, re.I)
+    if m:
+        steel = clean_spaces(m.group(1)).upper().replace(" ", "")
+    else:
+        steel_patterns = [
+            r"Wapening\s*:\s*staalkwaliteit\s*([^\n\.]+)",
+            r"staalkwaliteit[^A-Z0-9]{0,60}(DE\s*500\s*BS|BE\s*500(?:ES|BS|TS)?|BE500(?:ES|BS|TS)?)",
+            r"kwaliteit d[' ]acier[^A-Z0-9]{0,60}(DE\s*500\s*BS|BE\s*500(?:ES|BS|TS)?)",
+        ]
+        for pat in steel_patterns:
+            m = re.search(pat, combined_text, re.I)
+            if m:
+                steel = clean_spaces(m.group(1)).upper().replace(" ", "")
+                break
 
     top_mesh_note = None
-    for pat in [r"Bovenwapening\s*:\s*([^\n]+)", r"Armatures sup[ée]rieures\s*:\s*([^\n]+)"]:
-        m = re.search(pat, full_text, re.I)
+    for pat in [
+        r"Bovenwapening\s*:\s*(Zie studieplan|Wordt niet meegeleverd|[^\n\.]{1,80})",
+        r"Armatures sup[ée]rieures\s*:\s*(Voir plan de l[' ]ing[ée]nieur|[^\n\.]{1,80})",
+    ]:
+        m = re.search(pat, combined_text, re.I)
         if m:
             top_mesh_note = clean_spaces(m.group(1))
-            break
+            if top_mesh_note:
+                break
 
     fire = None
-    m = re.search(r"(REI\s*\d+)", full_text, re.I)
+    m = re.search(r"(REI\s*\d+)", combined_text, re.I)
     if m:
         fire = clean_spaces(m.group(1)).upper()
 
@@ -257,7 +376,7 @@ def finalize_row(row):
 
 
 def parse_predalco_table(pages, full_text):
-    meta = parse_common_supplier_meta(full_text)
+    meta = parse_common_supplier_meta(full_text, _pages_word_text(pages))
     rows = []
 
     for page in pages:
@@ -409,7 +528,7 @@ def _nearest_reinforcement(center, reinforcements):
 
 
 def parse_drawing_supplier(pages, full_text, supplier_label):
-    meta = parse_common_supplier_meta(full_text)
+    meta = parse_common_supplier_meta(full_text, _pages_word_text(pages))
     plates = []
     size_blocks = []
     rein_blocks = []
@@ -539,11 +658,24 @@ def build_report_pdf_bytes(design, supplier, project_title=""):
     supplier_concretes = sorted({str(row["concrete"]).upper() for row in rows if row.get("concrete")})
     supplier_fires = sorted({str(row["fire"]).upper() for row in rows if row.get("fire")})
 
-    concrete_status = "OK" if design["concrete"] and supplier_concretes and all(c == design["concrete"] for c in supplier_concretes) else "CHECK"
+    def _parse_concrete_strength(c):
+        m = re.match(r"C(\d+)/(\d+)", str(c or "").upper())
+        return (int(m.group(1)), int(m.group(2))) if m else None
+
+    design_concrete = _parse_concrete_strength(design["concrete"])
+    supplier_concrete_vals = [_parse_concrete_strength(c) for c in supplier_concretes]
+    supplier_concrete_vals = [c for c in supplier_concrete_vals if c]
+    concrete_status = "CHECK"
+    if design_concrete and supplier_concrete_vals:
+        if all(c[0] >= design_concrete[0] and c[1] >= design_concrete[1] for c in supplier_concrete_vals):
+            concrete_status = "OK"
+
     steel_status = "OK" if design["steel"] and supplier["supplier_steel"] and design["steel"] in supplier["supplier_steel"] else "CHECK"
     predal_status = "OK" if predal_thicknesses else "CHECK"
-    total_status = "CHECK" if total_thicknesses else "CHECK"
-    mesh_status = "CHECK"
+    total_status = "CHECK"
+    if design.get("total_thickness_mm") and total_thicknesses:
+        total_status = "OK" if all(t == design["total_thickness_mm"] for t in total_thicknesses) else "CHECK"
+    mesh_status = "OK" if design.get("top_mesh") and supplier.get("top_mesh_note") and design["top_mesh"] in supplier["top_mesh_note"].upper() else "CHECK"
     fire_status = "CHECK"
 
     global_rows = [
@@ -551,7 +683,7 @@ def build_report_pdf_bytes(design, supplier, project_title=""):
         ["Concrete class", f"{design['concrete'] or 'Not found'} minimum", ", ".join(supplier_concretes) or "Not found", concrete_status],
         ["Steel grade", design["steel"] or "Not found", supplier["supplier_steel"] or "Not found", steel_status],
         ["Predal thickness", "Supplier to determine (design note)" if design["supplier_det_note"] else "Design note not found", ", ".join(str(v) for v in predal_thicknesses) + " mm" if predal_thicknesses else "Not found", predal_status],
-        ["Total slab thickness", ", ".join(design["slab_notes"]) if design["slab_notes"] else "Not clearly readable on design sheet", ", ".join(str(v) for v in total_thicknesses) + " mm" if total_thicknesses else "Not found", total_status],
+        ["Total slab thickness", (f"{design['total_thickness_mm']} mm" if design.get("total_thickness_mm") else (", ".join(design["slab_notes"]) if design["slab_notes"] else "Not clearly readable on design sheet")), ", ".join(str(v) for v in total_thicknesses) + " mm" if total_thicknesses else "Not found", total_status],
         ["Mesh reinforcement", design["top_mesh"] or "Not found", supplier["top_mesh_note"] or "Not found", mesh_status],
         ["Fire resistance", design["fire_req"] or "Not found", ", ".join(supplier_fires) if supplier_fires else (supplier["fire_default"] or "Not found"), fire_status],
     ]
