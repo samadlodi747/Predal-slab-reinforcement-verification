@@ -1041,10 +1041,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     def _draw_frame(canvas, doc_obj):
         w, h = doc_obj.pagesize
         canvas.saveState()
-        canvas.setFillColor(HexColor("#173F6B"))
-        canvas.rect(0, h - 14 * mm, w, 14 * mm, fill=1, stroke=0)
-        canvas.setFillColor(HexColor("#1FA0A0"))
-        canvas.rect(0, h - 14 * mm, 42 * mm, 14 * mm, fill=1, stroke=0)
+        # Clean page frame without decorative header bars.
         canvas.setStrokeColor(HexColor("#D8E4F1"))
         canvas.setLineWidth(0.6)
         canvas.line(doc.leftMargin, 13 * mm, w - doc.rightMargin, 13 * mm)
@@ -1055,13 +1052,13 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
             try:
                 reader = ImageReader(logo_path)
                 iw, ih = reader.getSize()
-                max_w = 68 * mm
-                max_h = 22 * mm
+                max_w = 78 * mm
+                max_h = 24 * mm
                 scale = min(max_w / float(iw), max_h / float(ih), 1.0)
                 draw_w = iw * scale
                 draw_h = ih * scale
                 x = w - doc.rightMargin - draw_w
-                y = h - draw_h - 4.0 * mm
+                y = h - draw_h - 8.0 * mm
                 canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
             except Exception:
                 pass
@@ -1071,7 +1068,6 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story = []
     story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
     story.append(Paragraph(f"Project: {title}", styles["ReportSub"]))
-    story.append(Paragraph(f"Output layout: {'A3 Landscape' if is_landscape else 'A3 Portrait'}", styles["ReportSub"]))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("Predal Reinforcement Comparison", styles["SectionHead"]))
