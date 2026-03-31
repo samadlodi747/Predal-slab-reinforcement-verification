@@ -12,6 +12,7 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -1054,13 +1055,13 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
             try:
                 reader = ImageReader(logo_path)
                 iw, ih = reader.getSize()
-                max_w = 56 * mm
-                max_h = 19 * mm
+                max_w = 68 * mm
+                max_h = 22 * mm
                 scale = min(max_w / float(iw), max_h / float(ih), 1.0)
                 draw_w = iw * scale
                 draw_h = ih * scale
                 x = w - doc.rightMargin - draw_w
-                y = h - draw_h - 6.5 * mm
+                y = h - draw_h - 4.0 * mm
                 canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
             except Exception:
                 pass
