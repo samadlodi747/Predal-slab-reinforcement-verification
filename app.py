@@ -12,13 +12,13 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Image as RLImage, LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
+
 
 INDEX_HTML = """
 <!doctype html>
@@ -29,16 +29,17 @@ INDEX_HTML = """
   <title>Predal Reinforcement Verifier</title>
   <style>
     :root{
-      --bg:#eef3f9;
+      --bg:#edf3fa;
       --card:#ffffff;
-      --line:#d7e1ee;
-      --text:#142033;
-      --muted:#617189;
-      --primary:#153a63;
-      --primary-2:#21558d;
-      --soft:#f7fafd;
-      --shadow:0 18px 45px rgba(16,32,58,.10);
-      --radius:22px;
+      --line:#d6e1ef;
+      --text:#142133;
+      --muted:#607089;
+      --primary:#173f6b;
+      --primary-2:#255a96;
+      --accent:#1fa0a0;
+      --soft:#f7fafe;
+      --shadow:0 18px 45px rgba(19,39,68,.10);
+      --radius:24px;
     }
     *{box-sizing:border-box}
     html,body{margin:0;padding:0}
@@ -46,27 +47,26 @@ INDEX_HTML = """
       font-family:Arial,sans-serif;
       color:var(--text);
       background:
-        radial-gradient(circle at top left, #f8fbff 0, #eef3f9 36%, #e9eff7 100%);
+        radial-gradient(circle at top left, #f9fcff 0, #edf3fa 36%, #e6eef8 100%);
       min-height:100vh;
     }
     .page{
-      max-width:1120px;
+      max-width:1140px;
       margin:36px auto;
-      padding:0 20px;
+      padding:0 18px;
     }
     .shell{
-      background:rgba(255,255,255,.78);
-      border:1px solid rgba(215,225,238,.95);
-      border-radius:28px;
+      background:rgba(255,255,255,.82);
+      border:1px solid rgba(214,225,239,.95);
+      border-radius:30px;
       overflow:hidden;
       box-shadow:var(--shadow);
-      backdrop-filter: blur(14px);
+      backdrop-filter: blur(12px);
     }
     .hero{
       position:relative;
       padding:34px 34px 28px;
-      background:
-        linear-gradient(135deg, rgba(21,58,99,1) 0%, rgba(33,85,141,1) 100%);
+      background:linear-gradient(135deg, #173f6b 0%, #255a96 100%);
       color:#fff;
       overflow:hidden;
     }
@@ -101,45 +101,19 @@ INDEX_HTML = """
       line-height:1.06;
       font-weight:800;
     }
-    .hero p{
-      margin:12px 0 0;
-      max-width:760px;
-      font-size:17px;
-      line-height:1.5;
-      color:rgba(255,255,255,.92);
-    }
     .body{padding:30px}
     .top-row{
       display:grid;
-      grid-template-columns:1.1fr .9fr;
+      grid-template-columns:1.15fr .85fr;
       gap:18px;
       margin-bottom:18px;
     }
-    .field-card,
-    .mini-card{
+    .field-card{
       background:var(--card);
       border:1px solid var(--line);
-      border-radius:20px;
+      border-radius:22px;
       padding:18px;
       box-shadow:0 8px 24px rgba(14,25,42,.04);
-    }
-    .mini-card{
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      text-align:center;
-      min-height:100%;
-      background:linear-gradient(180deg,#ffffff 0%, #f9fbfe 100%);
-    }
-    .mini-card strong{
-      display:block;
-      font-size:20px;
-      margin-bottom:6px;
-    }
-    .mini-card span{
-      color:var(--muted);
-      font-size:14px;
-      line-height:1.45;
     }
     label{
       display:block;
@@ -147,7 +121,7 @@ INDEX_HTML = """
       font-weight:700;
       margin-bottom:10px;
     }
-    .text-input{
+    .text-input,.select-input{
       width:100%;
       border:1px solid var(--line);
       border-radius:14px;
@@ -158,7 +132,7 @@ INDEX_HTML = """
       outline:none;
       transition:border-color .18s ease, box-shadow .18s ease, background .18s ease;
     }
-    .text-input:focus{
+    .text-input:focus,.select-input:focus{
       border-color:#8fb2da;
       box-shadow:0 0 0 4px rgba(33,85,141,.10);
       background:#fff;
@@ -249,21 +223,17 @@ INDEX_HTML = """
     .actions{
       display:flex;
       align-items:center;
-      justify-content:space-between;
+      justify-content:flex-end;
       gap:16px;
       margin-top:24px;
       flex-wrap:wrap;
-    }
-    .subtle{
-      color:var(--muted);
-      font-size:13px;
     }
     .btn{
       appearance:none;
       border:none;
       border-radius:16px;
       padding:15px 22px;
-      min-width:230px;
+      min-width:240px;
       background:linear-gradient(135deg,var(--primary) 0%, var(--primary-2) 100%);
       color:#fff;
       font-size:15px;
@@ -285,9 +255,8 @@ INDEX_HTML = """
     <div class="shell">
       <div class="hero">
         <div class="hero-inner">
-          <div class="badge">A3 PDF Report</div>
+          <div class="badge">PDF Report Builder</div>
           <h1>Predal Reinforcement Verifier</h1>
-          <p>Upload the structural design PDF, the supplier Predal PDF, and optionally your company logo to generate a clean verification report.</p>
         </div>
       </div>
 
@@ -296,13 +265,14 @@ INDEX_HTML = """
           <div class="top-row">
             <div class="field-card">
               <label for="project_title">Project title</label>
-              <input class="text-input" type="text" id="project_title" name="project_title" placeholder="Example: 50 appartementen Abeelstraat - Blok A - Afdek +1">
+              <input class="text-input" type="text" id="project_title" name="project_title" value="">
             </div>
-            <div class="mini-card">
-              <div>
-                <strong>2 PDFs + optional logo</strong>
-                <span>1 polished A3 verification report out</span>
-              </div>
+            <div class="field-card">
+              <label for="report_orientation">Output layout</label>
+              <select class="select-input" id="report_orientation" name="report_orientation">
+                <option value="landscape" selected>A3 Landscape</option>
+                <option value="portrait">A3 Portrait</option>
+              </select>
             </div>
           </div>
 
@@ -337,7 +307,7 @@ INDEX_HTML = """
               <label class="dropzone" for="company_logo" id="logoDrop">
                 <div class="icon">🖼️</div>
                 <strong>Choose or drop file</strong>
-                <span>PNG or JPG. Added to the PDF top-left corner.</span>
+                <span>PNG or JPG</span>
               </label>
               <input class="hidden-input" type="file" id="company_logo" name="company_logo" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
               <div class="file-meta" id="logoMeta">No logo selected</div>
@@ -345,7 +315,6 @@ INDEX_HTML = """
           </div>
 
           <div class="actions">
-            <div class="subtle">Upload both PDFs. The logo is optional.</div>
             <button class="btn" id="submitBtn" type="submit">Generate verification PDF</button>
           </div>
         </form>
@@ -949,7 +918,8 @@ def extract_supplier_data(pdf_path):
     return data
 
 
-def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None):
+
+def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape"):
     rows = supplier["rows"]
     design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
 
@@ -1025,159 +995,170 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None):
     for label, fn in bins:
         bucket = [row["langs_mm2m"] for row in rows if fn(row["length"])]
         if bucket:
-            bin_lines.append(f"{label}: n={len(bucket)}, langs avg={mean(bucket):.1f} mm2/m, range {min(bucket)}-{max(bucket)}")
+            bin_lines.append(f"{label}: n={len(bucket)}, langs avg={mean(bucket):.1f} mm²/m, range {min(bucket)}-{max(bucket)}")
 
     sanity_lines = [
         f"Detected parser: {supplier.get('supplier_format', 'Unknown')}.",
-        f"All {len(rows)} supplier plates parsed from the supplier PDF." if rows else "No supplier plates could be parsed from the supplier PDF.",
-        f"{exact_ok} / {len(rows)} plates match one of the reinforcement families explicitly readable on the design PDF after converting mm2/m to cm2/m." if rows else "No plate-by-plate comparison could be completed.",
-        f"Transverse reinforcement minimum check (>= 1/5 of main and >= 2.50 cm2/m): {'OK' if dwars_ok and all(dwars_ok) else 'CHECK'}.",
-        "Exact geometric zone-to-plate mapping and span-direction verification cannot be proven from text extraction alone when the design sheet does not expose structured zone data.",
+        f"Parsed supplier plates: {len(rows)}." if rows else "No supplier plates could be parsed from the supplier PDF.",
+        f"Exact family matches: {exact_ok} / {len(rows)}." if rows else "No plate-by-plate comparison could be completed.",
+        f"Transverse reinforcement minimum check (>= 1/5 of main and >= 2.50 cm²/m): {'OK' if dwars_ok and all(dwars_ok) else 'CHECK'}.",
+        "Exact geometric zone mapping and span-direction verification still require engineer review on the full drawing set.",
     ]
     if bin_lines:
         sanity_lines.append("Length-based reinforcement trend: " + " | ".join(bin_lines))
 
     conclusion_lines = [
-        f"Numerical family check result: {exact_ok} / {len(rows)} plates are OK in the exact reinforcement-family comparison." if rows else "Numerical family check result: no rows parsed.",
-        "This automated workflow is reliable for supplier formats that expose readable plate labels, plate sizes, and reinforcement values in PDF text.",
-        "Before final approval, visually confirm reinforcement zone locations, main span direction, mesh requirement, and slab build-up areas on the full drawing set.",
+        f"Plate-by-plate reinforcement check: {exact_ok} of {len(rows)} parsed supplier plates satisfy the exact readable design reinforcement family comparison." if rows else "Plate-by-plate reinforcement check: no supplier plates could be validated automatically.",
+        f"Concrete check: supplier provides {', '.join(supplier_concretes) or 'not found'} against design minimum {design['concrete'] or 'not found'}; status {concrete_status}.",
+        f"Build-up check: supplier predal thickness {', '.join(str(v) for v in predal_thicknesses) + ' mm' if predal_thicknesses else 'not found'} and total slab thickness {', '.join(str(v) for v in total_thicknesses) + ' mm' if total_thicknesses else 'not found'} compared with the design note {f'{design['total_thickness_mm']} mm' if design.get('total_thickness_mm') else 'not clearly readable'}; status {total_status}.",
+        f"Mesh and fire review: design mesh requirement {design['top_mesh'] or 'not found'} and fire note {design['fire_req'] or 'not found'} should still be visually checked against the complete supplier drawing and architectural package.",
+        "Final engineering action: use this report as a verification aid, then confirm zone boundaries, span direction, detailing around openings/supports, and any sheet-specific notes before approval for production.",
     ]
 
+    is_landscape = (report_orientation or "landscape").lower() != "portrait"
+    page_size = landscape(A3) if is_landscape else A3
+
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="TitleX", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=HexColor("#163A63"), spaceAfter=6))
-    styles.add(ParagraphStyle(name="SubX", parent=styles["Normal"], fontName="Helvetica", fontSize=10, leading=13, textColor=HexColor("#444444")))
-    styles.add(ParagraphStyle(name="HeadX", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=13, leading=16, textColor=HexColor("#163A63"), spaceAfter=4, spaceBefore=8))
-    styles.add(ParagraphStyle(name="BodyX", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12))
-    styles.add(ParagraphStyle(name="SmallX", parent=styles["Normal"], fontName="Helvetica", fontSize=8, leading=10, textColor=HexColor("#555555")))
-    styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=10.5))
+    styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=22 if is_landscape else 20, leading=26 if is_landscape else 24, textColor=HexColor("#173F6B"), spaceAfter=4))
+    styles.add(ParagraphStyle(name="ReportSub", parent=styles["Normal"], fontName="Helvetica", fontSize=11, leading=14, textColor=HexColor("#4E6076")))
+    styles.add(ParagraphStyle(name="SectionHead", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=14 if is_landscape else 13, leading=17, textColor=HexColor("#173F6B"), spaceAfter=6, spaceBefore=8))
+    styles.add(ParagraphStyle(name="BodyX", parent=styles["Normal"], fontName="Helvetica", fontSize=10 if is_landscape else 9.2, leading=13 if is_landscape else 12))
+    styles.add(ParagraphStyle(name="SmallX", parent=styles["Normal"], fontName="Helvetica", fontSize=8.5, leading=10.5, textColor=HexColor("#5B6C80")))
+    styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=9.2 if is_landscape else 8.4, leading=11.2 if is_landscape else 10.2, textColor=HexColor("#162133")))
+    styles.add(ParagraphStyle(name="TableHead", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.6 if is_landscape else 8.8, leading=11.6 if is_landscape else 10.8, textColor=colors.white))
 
     pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         pdf_buffer,
-        pagesize=landscape(A3),
-        leftMargin=14 * mm,
-        rightMargin=14 * mm,
-        topMargin=(24 * mm if logo_path else 12 * mm),
-        bottomMargin=12 * mm,
+        pagesize=page_size,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=(28 * mm if logo_path else 20 * mm),
+        bottomMargin=14 * mm,
     )
 
-    def _draw_logo(canvas, doc_obj):
-        if not logo_path:
-            return
-        try:
-            reader = ImageReader(logo_path)
-            iw, ih = reader.getSize()
-            max_w = 42 * mm
-            max_h = 14 * mm
-            scale = min(max_w / float(iw), max_h / float(ih), 1.0)
-            draw_w = iw * scale
-            draw_h = ih * scale
-            x = doc.leftMargin
-            y = doc_obj.pagesize[1] - draw_h - 8 * mm
-            canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
+    def _draw_frame(canvas, doc_obj):
+        w, h = doc_obj.pagesize
+        canvas.saveState()
+        canvas.setFillColor(HexColor("#173F6B"))
+        canvas.rect(0, h - 14 * mm, w, 14 * mm, fill=1, stroke=0)
+        canvas.setFillColor(HexColor("#1FA0A0"))
+        canvas.rect(0, h - 14 * mm, 42 * mm, 14 * mm, fill=1, stroke=0)
+        canvas.setStrokeColor(HexColor("#D8E4F1"))
+        canvas.setLineWidth(0.6)
+        canvas.line(doc.leftMargin, 13 * mm, w - doc.rightMargin, 13 * mm)
+        canvas.setFont("Helvetica", 8.5)
+        canvas.setFillColor(HexColor("#6A7B90"))
+        canvas.drawRightString(w - doc.rightMargin, 8.5 * mm, f"Page {canvas.getPageNumber()}")
+        if logo_path:
+            try:
+                reader = ImageReader(logo_path)
+                iw, ih = reader.getSize()
+                max_w = 56 * mm
+                max_h = 19 * mm
+                scale = min(max_w / float(iw), max_h / float(ih), 1.0)
+                draw_w = iw * scale
+                draw_h = ih * scale
+                x = w - doc.rightMargin - draw_w
+                y = h - draw_h - 6.5 * mm
+                canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+            except Exception:
+                pass
+        canvas.restoreState()
 
     title = project_title.strip() or "Predal reinforcement verification"
     story = []
-    story.append(Paragraph("Predal Reinforcement Verification Report", styles["TitleX"]))
-    story.append(Paragraph(f"Project: {title}", styles["SubX"]))
-    story.append(Paragraph("Method: automatic PDF extraction, supplier auto-detection, exact reinforcement-family matching, global parameter checks, and structural sanity checks.", styles["SubX"]))
-    story.append(Spacer(1, 6))
-
-    key_data = [[
-        Paragraph("Report summary", styles["BodyX"]),
-        Paragraph(
-            f"{len(rows)} supplier plates parsed<br/>{len(design['families'])} design reinforcement families identified<br/>{exact_ok} / {len(rows)} exact family matches",
-            styles["BodyX"],
-        ),
-        Paragraph(
-            f"A3 landscape report<br/>Detected parser: {supplier.get('supplier_format', 'Unknown')}<br/>Global parameters included",
-            styles["BodyX"],
-        ),
-    ]]
-    key_tbl = LongTable(key_data, colWidths=[60 * mm, 95 * mm, 95 * mm])
-    key_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), HexColor("#EEF4FA")),
-        ("BOX", (0, 0), (-1, -1), 0.6, HexColor("#B8C7D9")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.4, HexColor("#C8D4E3")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story.append(key_tbl)
+    story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
+    story.append(Paragraph(f"Project: {title}", styles["ReportSub"]))
+    story.append(Paragraph(f"Output layout: {'A3 Landscape' if is_landscape else 'A3 Portrait'}", styles["ReportSub"]))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Predal Reinforcement Comparison", styles["HeadX"]))
+    story.append(Paragraph("Predal Reinforcement Comparison", styles["SectionHead"]))
+
+    if is_landscape:
+        comp_col_widths = [22 * mm, 58 * mm, 122 * mm, 132 * mm, 28 * mm]
+        global_col_widths = [48 * mm, 96 * mm, 182 * mm, 26 * mm]
+    else:
+        comp_col_widths = [18 * mm, 44 * mm, 78 * mm, 90 * mm, 22 * mm]
+        global_col_widths = [38 * mm, 64 * mm, 110 * mm, 20 * mm]
+
     comp_table_data = [[
-        Paragraph("Plate", styles["TableCell"]),
-        Paragraph("Plate size (mm)", styles["TableCell"]),
-        Paragraph("Design reinforcement (cm2/m)", styles["TableCell"]),
-        Paragraph("Supplier reinforcement (mm2/m)", styles["TableCell"]),
-        Paragraph("Status", styles["TableCell"]),
+        Paragraph("Plate", styles["TableHead"]),
+        Paragraph("Plate size (mm)", styles["TableHead"]),
+        Paragraph("Design reinforcement (cm²/m)", styles["TableHead"]),
+        Paragraph("Supplier reinforcement (mm²/m)", styles["TableHead"]),
+        Paragraph("Status", styles["TableHead"]),
     ]]
     for row in comparison_rows:
         comp_table_data.append([Paragraph(v, styles["TableCell"]) for v in row])
 
-    comp_col_widths = [20 * mm, 42 * mm, 68 * mm, 55 * mm, 22 * mm]
     comp_tbl = LongTable(comp_table_data, colWidths=comp_col_widths, repeatRows=1)
     comp_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#163A63")),
+        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#173F6B")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, HexColor("#1FA0A0")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#9FB2C8")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D3DDE8")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.55, HexColor("#AEC0D4")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D5E0EC")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
     ]))
+    for i, r in enumerate(comparison_rows, start=1):
+        status = r[-1]
+        if status == "OK":
+            comp_tbl.setStyle(TableStyle([("TEXTCOLOR", (-1, i), (-1, i), HexColor("#166B45")), ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold")]))
+        else:
+            comp_tbl.setStyle(TableStyle([("TEXTCOLOR", (-1, i), (-1, i), HexColor("#A05A00")), ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold")]))
     story.append(comp_tbl)
-    story.append(PageBreak())
 
-    story.append(Paragraph("Global Parameter Comparison", styles["HeadX"]))
+    story.append(PageBreak())
+    story.append(Paragraph("Global Parameter Comparison", styles["SectionHead"]))
     global_table_data = [[
-        Paragraph("Parameter", styles["TableCell"]),
-        Paragraph("Design requirement", styles["TableCell"]),
-        Paragraph("Supplier provided", styles["TableCell"]),
-        Paragraph("Status", styles["TableCell"]),
+        Paragraph("Parameter", styles["TableHead"]),
+        Paragraph("Design requirement", styles["TableHead"]),
+        Paragraph("Supplier provided", styles["TableHead"]),
+        Paragraph("Status", styles["TableHead"]),
     ]]
     for row in global_rows:
         global_table_data.append([Paragraph(v, styles["TableCell"]) for v in row])
 
-    global_tbl = LongTable(global_table_data, colWidths=[46 * mm, 90 * mm, 90 * mm, 22 * mm], repeatRows=1)
+    global_tbl = LongTable(global_table_data, colWidths=global_col_widths, repeatRows=1)
     global_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#163A63")),
+        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#173F6B")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, HexColor("#1FA0A0")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("BOX", (0, 0), (-1, -1), 0.5, HexColor("#9FB2C8")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D3DDE8")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.55, HexColor("#AEC0D4")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, HexColor("#D5E0EC")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, HexColor("#F7FAFD")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
     ]))
+    for i, r in enumerate(global_rows, start=1):
+        status = r[-1]
+        color = "#166B45" if status == "OK" else "#A05A00"
+        global_tbl.setStyle(TableStyle([("TEXTCOLOR", (-1, i), (-1, i), HexColor(color)), ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold")]))
     story.append(global_tbl)
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("Structural Sanity Check", styles["HeadX"]))
+    story.append(Paragraph("Structural Sanity Check", styles["SectionHead"]))
     for line in sanity_lines:
         story.append(Paragraph("• " + line, styles["BodyX"]))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Engineering Conclusion", styles["HeadX"]))
+    story.append(Paragraph("Engineering Conclusion", styles["SectionHead"]))
     for line in conclusion_lines:
         story.append(Paragraph("• " + line, styles["BodyX"]))
     story.append(Spacer(1, 6))
-    story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must verify zone locations, detailing, and any additional reinforcement notes on the full drawing set.", styles["SmallX"]))
+    story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must still verify zone locations, detailing, and sheet-specific notes before approval.", styles["SmallX"]))
 
-    doc.build(story, onFirstPage=_draw_logo, onLaterPages=_draw_logo)
+    doc.build(story, onFirstPage=_draw_frame, onLaterPages=_draw_frame)
     pdf_buffer.seek(0)
     return pdf_buffer
 
@@ -1192,12 +1173,17 @@ def healthz():
     return "ok", 200
 
 
+
 @app.route("/generate", methods=["POST"])
 def generate():
     design_file = request.files.get("design_pdf")
     supplier_file = request.files.get("supplier_pdf")
     logo_file = request.files.get("company_logo")
     project_title = (request.form.get("project_title") or "").strip()
+    report_orientation = (request.form.get("report_orientation") or "landscape").strip().lower()
+
+    if report_orientation not in {"landscape", "portrait"}:
+        report_orientation = "landscape"
 
     if not design_file or not supplier_file:
         return "Both PDF files are required.", 400
@@ -1228,7 +1214,13 @@ def generate():
                 "Try a cleaner PDF export or update the parser for this supplier layout."
             ), 400
 
-        pdf_buffer = build_report_pdf_bytes(design, supplier, project_title=project_title, logo_path=logo_path)
+        pdf_buffer = build_report_pdf_bytes(
+            design,
+            supplier,
+            project_title=project_title,
+            logo_path=logo_path,
+            report_orientation=report_orientation,
+        )
         return send_file(
             pdf_buffer,
             as_attachment=True,
