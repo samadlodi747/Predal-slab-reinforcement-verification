@@ -277,6 +277,9 @@ INDEX_HTML = """
             </div>
           </div>
 
+          <input type="hidden" id="client_local_date" name="client_local_date" value="">
+          <input type="hidden" id="client_time_zone" name="client_time_zone" value="">
+
           <div class="upload-grid">
             <div class="upload-card">
               <h3>Structural design PDF</h3>
@@ -382,7 +385,24 @@ INDEX_HTML = """
     bindDropzone("supplier_pdf", "supplierMeta", "supplierDrop", "pdf");
     bindDropzone("company_logo", "logoMeta", "logoDrop", "logo");
 
+    function setClientDateFields(){
+      const dateField = document.getElementById("client_local_date");
+      const tzField = document.getElementById("client_time_zone");
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+      const formatted = new Intl.DateTimeFormat("en-GB", {
+        timeZone: tz || undefined,
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric"
+      }).format(new Date());
+      dateField.value = formatted;
+      tzField.value = tz;
+    }
+
+    setClientDateFields();
+
     document.getElementById("verifyForm").addEventListener("submit", function(){
+      setClientDateFields();
       const btn = document.getElementById("submitBtn");
       btn.disabled = true;
       btn.textContent = "Generating PDF...";
@@ -920,7 +940,7 @@ def extract_supplier_data(pdf_path):
 
 
 
-def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape"):
+def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
     rows = supplier["rows"]
     design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
 
@@ -1038,22 +1058,27 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         bottomMargin=14 * mm,
     )
 
-    def _draw_frame(canvas, doc_obj):
+    def _draw_common_frame(canvas, doc_obj):
         w, h = doc_obj.pagesize
         canvas.saveState()
-        # Clean page frame without decorative header bars.
         canvas.setStrokeColor(HexColor("#D8E4F1"))
         canvas.setLineWidth(0.6)
         canvas.line(doc.leftMargin, 13 * mm, w - doc.rightMargin, 13 * mm)
         canvas.setFont("Helvetica", 8.5)
         canvas.setFillColor(HexColor("#6A7B90"))
         canvas.drawRightString(w - doc.rightMargin, 8.5 * mm, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    def _draw_first_page(canvas, doc_obj):
+        _draw_common_frame(canvas, doc_obj)
         if logo_path:
+            w, h = doc_obj.pagesize
+            canvas.saveState()
             try:
                 reader = ImageReader(logo_path)
                 iw, ih = reader.getSize()
-                max_w = 78 * mm
-                max_h = 24 * mm
+                max_w = 86 * mm
+                max_h = 26 * mm
                 scale = min(max_w / float(iw), max_h / float(ih), 1.0)
                 draw_w = iw * scale
                 draw_h = ih * scale
@@ -1062,12 +1087,17 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
                 canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
             except Exception:
                 pass
-        canvas.restoreState()
+            canvas.restoreState()
+
+    def _draw_later_pages(canvas, doc_obj):
+        _draw_common_frame(canvas, doc_obj)
 
     title = project_title.strip() or "Predal reinforcement verification"
     story = []
     story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
     story.append(Paragraph(f"Project: {title}", styles["ReportSub"]))
+    if report_date_str:
+        story.append(Paragraph(f"Date: {report_date_str}", styles["ReportSub"]))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("Predal Reinforcement Comparison", styles["SectionHead"]))
@@ -1155,7 +1185,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(Spacer(1, 6))
     story.append(Paragraph("Disclaimer: This report is based on automated extraction from the uploaded PDFs. A qualified engineer must still verify zone locations, detailing, and sheet-specific notes before approval.", styles["SmallX"]))
 
-    doc.build(story, onFirstPage=_draw_frame, onLaterPages=_draw_frame)
+    doc.build(story, onFirstPage=_draw_first_page, onLaterPages=_draw_later_pages)
     pdf_buffer.seek(0)
     return pdf_buffer
 
@@ -1170,6 +1200,12 @@ def healthz():
     return "ok", 200
 
 
+def _safe_report_date(date_str):
+    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", date_str or ""):
+        return date_str
+    return ""
+
+
 
 @app.route("/generate", methods=["POST"])
 def generate():
@@ -1177,6 +1213,8 @@ def generate():
     supplier_file = request.files.get("supplier_pdf")
     logo_file = request.files.get("company_logo")
     project_title = (request.form.get("project_title") or "").strip()
+    client_local_date = (request.form.get("client_local_date") or "").strip()
+    client_time_zone = (request.form.get("client_time_zone") or "").strip()
     report_orientation = (request.form.get("report_orientation") or "landscape").strip().lower()
 
     if report_orientation not in {"landscape", "portrait"}:
@@ -1217,6 +1255,7 @@ def generate():
             project_title=project_title,
             logo_path=logo_path,
             report_orientation=report_orientation,
+            report_date_str=_safe_report_date(client_local_date),
         )
         return send_file(
             pdf_buffer,
