@@ -1,35 +1,93 @@
-# Predal Verifier – Render deployment package
+# Predal Reinforcement Verification Tool
 
-This package is ready to deploy to Render as a public web app.
+## Overview
+This tool automates the verification of predal reinforcement by comparing structural design PDFs with supplier drawings.
 
-## Files
-- `app.py` - Flask app
-- `requirements.txt` - Python dependencies
-- `render.yaml` - Render Blueprint config
-- `.python-version` - Python version for Render
+It extracts key engineering parameters from unstructured PDF drawings and generates a structured verification report.
 
-## Fastest deployment
-1. Create a new GitHub repository.
-2. Upload all files from this folder to that repository.
-3. Log in to Render.
-4. Click **New > Blueprint**.
-5. Connect the GitHub repository.
-6. Confirm deployment.
+---
 
-Render will build the service and assign an `onrender.com` URL.
+## Problem Statement
+Manual verification of predal drawings is time-consuming and prone to inconsistencies.
 
-## Alternate manual deployment
-If you use **New > Web Service** instead of Blueprint, use:
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `gunicorn app:app --workers 2 --threads 4 --timeout 180`
+This tool aims to:
+- Reduce manual effort
+- Improve consistency in checks
+- Structure engineering data from drawings
 
-## Notes
-- The app includes a `/healthz` endpoint for Render health checks.
-- Free web services may sleep after inactivity depending on your Render plan.
-- Uploaded PDFs are processed temporarily in memory / temp files during each request.
+---
 
-## Local run
+## Key Features
+- Extract reinforcement (HW / DW) from design drawings  
+- Extract slab thickness and build-up  
+- Extract supplier predal drawings (multiple formats)  
+- Plate-by-plate comparison (design vs supplier)  
+- Global parameter verification (concrete, mesh, thickness)  
+- Generate structured PDF report  
+- Optional company logo support  
+- Landscape / Portrait report layout  
+
+---
+
+## Workflow
+1. Upload design PDF and supplier PDF  
+2. System extracts relevant engineering data  
+3. Applies comparison logic  
+4. Generates a verification report  
+
+---
+
+## Tech Stack
+- Python (Flask)
+- PyMuPDF (PDF text extraction)
+- ReportLab (PDF generation)
+- Regex & rule-based parsing
+
+---
+
+## Core Logic
+The system is structured into four main steps:
+
+1. **Extraction**  
+   Read PDF and extract text, blocks, and words  
+
+2. **Parsing**  
+   Identify reinforcement, thickness, and parameters using pattern matching  
+
+3. **Comparison**  
+   Match supplier data with design requirements  
+
+4. **Reporting**  
+   Generate a structured PDF output  
+
+---
+
+## Limitations
+- Based on defined extraction logic and pattern recognition from drawings  
+- Accuracy depends on PDF quality and format consistency  
+- Requires engineering validation before final approval  
+
+---
+
+## Future Improvements
+- Better handling of different supplier formats  
+- Improved parsing accuracy  
+- Integration with pricing logic  
+- Semi-automated plan interpretation  
+
+---
+
+## Deployment
+This app is configured for deployment on Render.
+
+### Quick Deploy
+1. Push this repository to GitHub  
+2. Connect repository in Render (Blueprint)  
+3. Deploy  
+
+---
+
+## Local Run
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 python app.py
-```
