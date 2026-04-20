@@ -2,3 +2,5 @@ Flask
 gunicorn
 pymupdf
 reportlab
+numpy
+opencv-python-headless
