@@ -1,8 +1,10 @@
 
+import html
 import io
 import math
 import os
 import re
+import tempfile
 from statistics import mean
 
 import fitz
@@ -414,21 +416,41 @@ INDEX_HTML = """
 
 
 def read_pdf(pdf_path):
-    doc = fitz.open(pdf_path)
     pages = []
     full_text_parts = []
-    for page in doc:
-        blocks = page.get_text("blocks", sort=True)
-        words = page.get_text("words")
-        text = page.get_text("text", sort=True)
-        pages.append({"blocks": blocks, "words": words, "text": text})
-        full_text_parts.append(text)
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                blocks = page.get_text("blocks", sort=True)
+                words = page.get_text("words", sort=True)
+                text = page.get_text("text", sort=True)
+                pages.append({"blocks": blocks, "words": words, "text": text})
+                full_text_parts.append(text)
+    except Exception as exc:
+        raise ValueError("Uploaded PDF could not be read. Please use a clean, non-password-protected PDF export.") from exc
     return pages, "\n".join(full_text_parts)
 
 
 
 def clean_spaces(s):
     return re.sub(r"[ \t]+", " ", s or "").strip()
+
+
+def normalize_grade(value):
+    return re.sub(r"\s+", "", str(value or "").upper())
+
+
+def parse_fire_rating(value):
+    m = re.search(r"REI\s*(\d+)", str(value or ""), re.I)
+    return int(m.group(1)) if m else None
+
+
+def is_allowed_pdf_filename(filename):
+    return str(filename or "").lower().endswith(".pdf")
+
+
+def is_allowed_logo_filename(filename):
+    return str(filename or "").lower().endswith((".png", ".jpg", ".jpeg"))
 
 
 def normalize_storey_key(text):
@@ -983,13 +1005,34 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         if all(c[0] >= design_concrete[0] and c[1] >= design_concrete[1] for c in supplier_concrete_vals):
             concrete_status = "OK"
 
-    steel_status = "OK" if design["steel"] and supplier["supplier_steel"] and design["steel"] in supplier["supplier_steel"] else "CHECK"
+    design_steel = normalize_grade(design["steel"])
+    supplier_steel = normalize_grade(supplier["supplier_steel"])
+    steel_status = (
+        "OK"
+        if design_steel and supplier_steel and (
+            design_steel == supplier_steel
+            or design_steel in supplier_steel
+            or supplier_steel in design_steel
+        )
+        else "CHECK"
+    )
+
     predal_status = "OK" if predal_thicknesses else "CHECK"
     total_status = "CHECK"
     if design.get("total_thickness_mm") and total_thicknesses:
         total_status = "OK" if all(t == design["total_thickness_mm"] for t in total_thicknesses) else "CHECK"
+
     mesh_status = "OK" if design.get("top_mesh") and supplier.get("top_mesh_note") and design["top_mesh"] in supplier["top_mesh_note"].upper() else "CHECK"
+
+    design_fire = parse_fire_rating(design.get("fire_req"))
+    supplier_fire_candidates = [parse_fire_rating(v) for v in supplier_fires]
+    supplier_default_fire = parse_fire_rating(supplier.get("fire_default"))
+    if supplier_default_fire is not None:
+        supplier_fire_candidates.append(supplier_default_fire)
+    supplier_fire_candidates = [v for v in supplier_fire_candidates if v is not None]
     fire_status = "CHECK"
+    if design_fire is not None and supplier_fire_candidates:
+        fire_status = "OK" if all(v >= design_fire for v in supplier_fire_candidates) else "CHECK"
 
     global_rows = [
         ["Detected supplier parser", "Auto detection", supplier.get("supplier_format", "Not found"), "OK" if rows else "CHECK"],
@@ -1028,10 +1071,14 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     if bin_lines:
         sanity_lines.append("Length-based reinforcement trend: " + " | ".join(bin_lines))
 
+    design_total_note = f"{design['total_thickness_mm']} mm" if design.get("total_thickness_mm") else "not clearly readable"
+    supplier_predal_note = ", ".join(str(v) for v in predal_thicknesses) + " mm" if predal_thicknesses else "not found"
+    supplier_total_note = ", ".join(str(v) for v in total_thicknesses) + " mm" if total_thicknesses else "not found"
+
     conclusion_lines = [
         f"Plate-by-plate reinforcement check: {exact_ok} of {len(rows)} parsed supplier plates satisfy the exact readable design reinforcement family comparison." if rows else "Plate-by-plate reinforcement check: no supplier plates could be validated automatically.",
         f"Concrete check: supplier provides {', '.join(supplier_concretes) or 'not found'} against design minimum {design['concrete'] or 'not found'}; status {concrete_status}.",
-        f"Build-up check: supplier predal thickness {', '.join(str(v) for v in predal_thicknesses) + ' mm' if predal_thicknesses else 'not found'} and total slab thickness {', '.join(str(v) for v in total_thicknesses) + ' mm' if total_thicknesses else 'not found'} compared with the design note {f'{design['total_thickness_mm']} mm' if design.get('total_thickness_mm') else 'not clearly readable'}; status {total_status}.",
+        f"Build-up check: supplier predal thickness {supplier_predal_note} and total slab thickness {supplier_total_note} compared with the design note {design_total_note}; status {total_status}.",
         f"Mesh and fire review: design mesh requirement {design['top_mesh'] or 'not found'} and fire note {design['fire_req'] or 'not found'} should still be visually checked against the complete supplier drawing and architectural package.",
         "Final engineering action: use this report as a verification aid, then confirm zone boundaries, span direction, detailing around openings/supports, and any sheet-specific notes before approval for production.",
     ]
@@ -1108,6 +1155,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         _draw_common_frame(canvas, doc_obj)
 
     title = project_title.strip() or "Predal reinforcement verification"
+    safe_title = html.escape(title)
 
     def _section_chip(text):
         chip = LongTable([[Paragraph(text, styles["SectionHead"])]], colWidths=[doc.width])
@@ -1124,7 +1172,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(Spacer(1, 4))
     story.append(Paragraph("Predal Reinforcement Verification Report", styles["ReportTitle"]))
 
-    meta_rows = [[Paragraph(f"<b>Project</b>: {title}", styles["ReportSub"])]]
+    meta_rows = [[Paragraph(f"<b>Project</b>: {safe_title}", styles["ReportSub"])]]
     if report_date_str:
         meta_rows[0].append(Paragraph(f"<b>Date</b>: {report_date_str}", styles["ReportSub"]))
     else:
@@ -1260,10 +1308,16 @@ def generate():
     if report_orientation not in {"landscape", "portrait"}:
         report_orientation = "landscape"
 
-    if not design_file or not supplier_file:
+    if not design_file or not supplier_file or not design_file.filename or not supplier_file.filename:
         return "Both PDF files are required.", 400
 
-    import tempfile
+    if not is_allowed_pdf_filename(design_file.filename) or not is_allowed_pdf_filename(supplier_file.filename):
+        return "Both uploaded files must be PDF documents.", 400
+
+    if logo_file and getattr(logo_file, "filename", "") and not is_allowed_logo_filename(logo_file.filename):
+        return "Logo must be a PNG or JPG image.", 400
+
+    _ = client_time_zone  # reserved for future timezone-aware report metadata
 
     with tempfile.TemporaryDirectory() as temp_dir:
         design_path = os.path.join(temp_dir, "design.pdf")
@@ -1274,13 +1328,18 @@ def generate():
         logo_path = None
         if logo_file and getattr(logo_file, "filename", ""):
             ext = os.path.splitext(logo_file.filename)[1].lower()
-            if ext not in {".png", ".jpg", ".jpeg"}:
-                return "Logo must be a PNG or JPG image.", 400
             logo_path = os.path.join(temp_dir, f"company_logo{ext}")
             logo_file.save(logo_path)
 
-        supplier = extract_supplier_data(supplier_path)
-        design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
+        try:
+            supplier = extract_supplier_data(supplier_path)
+            design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
+        except ValueError as exc:
+            app.logger.warning("PDF processing failed: %s", exc)
+            return str(exc), 400
+        except Exception:
+            app.logger.exception("Unexpected processing error")
+            return "The uploaded files could not be processed. Please try a cleaner PDF export.", 400
 
         if not supplier["rows"]:
             return (
@@ -1303,6 +1362,7 @@ def generate():
             download_name="Predal_Reinforcement_Verification_Report.pdf",
             mimetype="application/pdf",
         )
+
 
 
 if __name__ == "__main__":
