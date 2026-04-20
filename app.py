@@ -1287,7 +1287,7 @@ def _direction_label(code):
     return mapping.get(code, str(code or "Not found"))
 
 
-def _render_page_gray(page, zoom=1.25):
+def _render_page_gray(page, zoom=0.85):
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n == 4:
@@ -1295,6 +1295,12 @@ def _render_page_gray(page, zoom=1.25):
     else:
         arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    max_side = 2200
+    h, w = gray.shape[:2]
+    if max(h, w) > max_side:
+        scale = max_side / float(max(h, w))
+        gray = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+        zoom *= scale
     return gray, zoom
 
 
@@ -1326,92 +1332,71 @@ def _bbox_contains_point(bbox, pt):
     return x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1
 
 
-def _find_symbol_matches(gray_page, template_path, expected_count=20, search_bbox=None):
+def _load_bearing_template(template_path):
     if cv2 is None or not template_path:
-        return []
+        return None
     template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
     if template is None or template.size == 0:
-        return []
+        return None
     template = _trim_template(template)
     if template is None or template.size == 0:
-        return []
+        return None
+    max_side = 180
+    h, w = template.shape[:2]
+    if max(h, w) > max_side:
+        scale = max_side / float(max(h, w))
+        template = cv2.resize(template, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    return template
 
+
+def _find_best_symbol_near_center(gray_page, template_gray, center, window=240):
+    if cv2 is None or template_gray is None or center is None:
+        return None
+
+    cx, cy = int(center[0]), int(center[1])
+    x0 = max(0, cx - window)
+    y0 = max(0, cy - window)
+    x1 = min(gray_page.shape[1], cx + window)
+    y1 = min(gray_page.shape[0], cy + window)
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    roi = gray_page[y0:y1, x0:x1]
+    if roi.size == 0 or min(roi.shape[:2]) < 20:
+        return None
+
+    page_edges = cv2.Canny(roi, 50, 150)
     direction_map = {
         0: "left_to_right",
         90: "top_to_bottom",
         180: "right_to_left",
         270: "bottom_to_top",
     }
-    if search_bbox:
-        x0, y0, x1, y1 = [int(v) for v in search_bbox]
-        x0 = max(0, x0)
-        y0 = max(0, y0)
-        x1 = min(gray_page.shape[1], x1)
-        y1 = min(gray_page.shape[0], y1)
-        if x1 <= x0 or y1 <= y0:
-            page_roi = gray_page
-            offset_x = 0
-            offset_y = 0
-        else:
-            page_roi = gray_page[y0:y1, x0:x1]
-            offset_x = x0
-            offset_y = y0
-    else:
-        page_roi = gray_page
-        offset_x = 0
-        offset_y = 0
 
-    page_edges = cv2.Canny(page_roi, 50, 150)
-    candidates = []
-    max_per_variant = max(6, int(expected_count) * 3)
+    best = None
     for angle in [0, 90, 180, 270]:
-        rotated = _rotate_template(template, angle)
-        for scale in [0.85, 1.0, 1.15]:
+        rotated = _rotate_template(template_gray, angle)
+        for scale in [0.9, 1.0]:
             w = max(12, int(rotated.shape[1] * scale))
             h = max(12, int(rotated.shape[0] * scale))
-            if w >= page_roi.shape[1] or h >= page_roi.shape[0]:
+            if w >= roi.shape[1] or h >= roi.shape[0]:
                 continue
             resized = cv2.resize(rotated, (w, h), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR)
             temp_edges = cv2.Canny(resized, 50, 150)
             res = cv2.matchTemplate(page_edges, temp_edges, cv2.TM_CCOEFF_NORMED)
-            res_work = res.copy()
-            for _ in range(max_per_variant):
-                _, max_val, _, max_loc = cv2.minMaxLoc(res_work)
-                if max_val < 0.45:
-                    break
-                x, y = max_loc
-                candidates.append({
-                    "score": float(max_val),
-                    "bbox": (x + offset_x, y + offset_y, x + w + offset_x, y + h + offset_y),
-                    "direction": direction_map[angle],
-                })
-                rx0 = max(0, x - w // 2)
-                ry0 = max(0, y - h // 2)
-                rx1 = min(res_work.shape[1], x + w // 2)
-                ry1 = min(res_work.shape[0], y + h // 2)
-                res_work[ry0:ry1, rx0:rx1] = -1.0
-
-    def _iou(a, b):
-        ax0, ay0, ax1, ay1 = a
-        bx0, by0, bx1, by1 = b
-        inter_w = max(0, min(ax1, bx1) - max(ax0, bx0))
-        inter_h = max(0, min(ay1, by1) - max(ay0, by0))
-        inter = inter_w * inter_h
-        if inter <= 0:
-            return 0.0
-        area = (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter
-        return inter / area if area else 0.0
-
-    selected = []
-    for cand in sorted(candidates, key=lambda item: item["score"], reverse=True):
-        if any(_iou(cand["bbox"], prev["bbox"]) > 0.25 for prev in selected):
-            continue
-        x0, y0, x1, y1 = cand["bbox"]
-        cand["center"] = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
-        selected.append(cand)
-        if len(selected) >= max(6, int(expected_count) * 2):
-            break
-    return selected
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if max_val < 0.50:
+                continue
+            x, y = max_loc
+            cand = {
+                "score": float(max_val),
+                "bbox": (x + x0, y + y0, x + w + x0, y + h + y0),
+                "center": (x + x0 + w / 2.0, y + y0 + h / 2.0),
+                "direction": direction_map[angle],
+            }
+            if best is None or cand["score"] > best["score"]:
+                best = cand
+    return best
 
 
 def _extract_supplier_plan_bbox(page):
@@ -1580,6 +1565,12 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
         result["note"] = "Bearing prototype unavailable: OpenCV is not installed on the server."
         return result
 
+    design_template = _load_bearing_template(design_template_path)
+    supplier_template = _load_bearing_template(supplier_template_path)
+    if design_template is None or supplier_template is None:
+        result["note"] = "Bearing prototype skipped: uploaded symbol images could not be read."
+        return result
+
     design_centers, design_plan_bbox, design_storey, design_page_index = _extract_design_plate_centers_for_bearing(design_pdf_path, supplier_full_text or "")
     supplier_expected = [int(row["plate"]) for row in supplier_rows if row.get("plate") is not None]
     supplier_centers = _extract_supplier_plate_centers_for_bearing(supplier_pdf_path, supplier_expected)
@@ -1588,31 +1579,37 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
     result["supplier_plate_centers"] = len(supplier_centers)
     result["design_storey"] = design_storey
 
+    if not design_centers or not supplier_centers:
+        result["note"] = "Bearing prototype skipped: plate centers could not be detected reliably."
+        return result
+
+    # Cap workload to keep Render requests responsive.
+    design_centers = dict(list(sorted(design_centers.items()))[:25])
+    supplier_centers = dict(list(sorted(supplier_centers.items()))[:25])
+
     with fitz.open(design_pdf_path) as ddoc:
         dpage = ddoc[design_page_index or 0]
-        dgray, dzoom = _render_page_gray(dpage, zoom=1.25)
+        dgray, dzoom = _render_page_gray(dpage, zoom=0.85)
     with fitz.open(supplier_pdf_path) as sdoc:
         spage = sdoc[0]
-        sgray, szoom = _render_page_gray(spage, zoom=1.25)
+        sgray, szoom = _render_page_gray(spage, zoom=0.85)
         supplier_plan_bbox = _extract_supplier_plan_bbox(spage)
-
-    d_search = None
-    if design_plan_bbox:
-        d_search = tuple(v * dzoom for v in design_plan_bbox)
-    s_search = tuple(v * szoom for v in supplier_plan_bbox) if supplier_plan_bbox else None
-
-    design_expected = min(max(1, len(design_centers)), 20)
-    supplier_expected_count = min(max(1, len(supplier_centers)), 20)
-    design_matches = _find_symbol_matches(dgray, design_template_path, expected_count=design_expected, search_bbox=d_search)
-    supplier_matches = _find_symbol_matches(sgray, supplier_template_path, expected_count=supplier_expected_count, search_bbox=s_search)
 
     scaled_design_centers = {k: (v[0] * dzoom, v[1] * dzoom) for k, v in design_centers.items()}
     scaled_supplier_centers = {k: (v[0] * szoom, v[1] * szoom) for k, v in supplier_centers.items()}
-    scaled_design_bbox = tuple(v * dzoom for v in design_plan_bbox) if design_plan_bbox else None
-    scaled_supplier_bbox = tuple(v * szoom for v in supplier_plan_bbox) if supplier_plan_bbox else None
 
-    design_assignments = _assign_symbol_matches_to_centers(design_matches, scaled_design_centers, scaled_design_bbox)
-    supplier_assignments = _assign_symbol_matches_to_centers(supplier_matches, scaled_supplier_centers, scaled_supplier_bbox)
+    design_assignments = {}
+    for key, center in scaled_design_centers.items():
+        hit = _find_best_symbol_near_center(dgray, design_template, center, window=220)
+        if hit:
+            design_assignments[key] = hit
+
+    supplier_assignments = {}
+    for key, center in scaled_supplier_centers.items():
+        hit = _find_best_symbol_near_center(sgray, supplier_template, center, window=220)
+        if hit:
+            supplier_assignments[key] = hit
+
     pairs = _pair_supplier_to_design_regions(supplier_centers, supplier_plan_bbox, design_centers, design_plan_bbox)
 
     rows = []
@@ -1624,10 +1621,7 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
         design_plate = pair.get("design_plate")
         design_dir = design_assignments.get(design_plate, {}).get("direction")
         supplier_dir = supplier_assignments.get(plate_no, {}).get("direction")
-        if design_dir and supplier_dir:
-            status = "OK" if design_dir == supplier_dir else "CHECK"
-        else:
-            status = "CHECK"
+        status = "OK" if (design_dir and supplier_dir and design_dir == supplier_dir) else "CHECK"
         if design_dir or supplier_dir or design_plate:
             rows.append({
                 "plate": plate_no,
@@ -1648,7 +1642,7 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
     result["ok_count"] = ok_count
     result["check_count"] = check_count
     if rows:
-        result["note"] = "Prototype compares uploaded bearing symbols by rotated template matching and nearest-plate mapping."
+        result["note"] = "Prototype compares uploaded bearing symbols near detected plate centers in a lighter server-safe mode."
     else:
         result["note"] = "Prototype could not assign bearing symbols to comparable plates."
     return result
