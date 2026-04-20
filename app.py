@@ -1349,7 +1349,8 @@ def _load_bearing_template(template_path):
     return template
 
 
-def _find_best_symbol_near_center(gray_page, template_gray, center, window=240):
+
+def _find_best_symbol_near_center(gray_page, template_gray, center, window=260):
     if cv2 is None or template_gray is None or center is None:
         return None
 
@@ -1365,7 +1366,10 @@ def _find_best_symbol_near_center(gray_page, template_gray, center, window=240):
     if roi.size == 0 or min(roi.shape[:2]) < 20:
         return None
 
-    page_edges = cv2.Canny(roi, 50, 150)
+    # Normalize contrast lightly: this makes scans / screenshots more stable.
+    roi_eq = cv2.equalizeHist(roi)
+    page_edges = cv2.Canny(roi_eq, 40, 140)
+
     direction_map = {
         0: "left_to_right",
         90: "top_to_bottom",
@@ -1374,22 +1378,43 @@ def _find_best_symbol_near_center(gray_page, template_gray, center, window=240):
     }
 
     best = None
+    # Wider but still lightweight scale range to tolerate different uploaded crop sizes.
+    scales = [0.65, 0.8, 1.0, 1.2]
     for angle in [0, 90, 180, 270]:
         rotated = _rotate_template(template_gray, angle)
-        for scale in [0.9, 1.0]:
-            w = max(12, int(rotated.shape[1] * scale))
-            h = max(12, int(rotated.shape[0] * scale))
+        rotated = cv2.equalizeHist(rotated)
+        for scale in scales:
+            w = max(14, int(rotated.shape[1] * scale))
+            h = max(14, int(rotated.shape[0] * scale))
             if w >= roi.shape[1] or h >= roi.shape[0]:
                 continue
-            resized = cv2.resize(rotated, (w, h), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR)
-            temp_edges = cv2.Canny(resized, 50, 150)
-            res = cv2.matchTemplate(page_edges, temp_edges, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            if max_val < 0.50:
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            resized = cv2.resize(rotated, (w, h), interpolation=interp)
+            temp_edges = cv2.Canny(resized, 40, 140)
+            if temp_edges.size == 0:
                 continue
+
+            # Edge match is robust to color differences.
+            res_edges = cv2.matchTemplate(page_edges, temp_edges, cv2.TM_CCOEFF_NORMED)
+            _, max_val_edges, _, max_loc_edges = cv2.minMaxLoc(res_edges)
+
+            # Gray match helps when edges are too sparse.
+            res_gray = cv2.matchTemplate(roi_eq, resized, cv2.TM_CCOEFF_NORMED)
+            _, max_val_gray, _, max_loc_gray = cv2.minMaxLoc(res_gray)
+
+            if max_val_edges >= max_val_gray:
+                score = float(max_val_edges)
+                max_loc = max_loc_edges
+            else:
+                score = float(max_val_gray)
+                max_loc = max_loc_gray
+
+            if score < 0.34:
+                continue
+
             x, y = max_loc
             cand = {
-                "score": float(max_val),
+                "score": round(score, 4),
                 "bbox": (x + x0, y + y0, x + w + x0, y + h + y0),
                 "center": (x + x0 + w / 2.0, y + y0 + h / 2.0),
                 "direction": direction_map[angle],
@@ -1622,7 +1647,8 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
         design_dir = design_assignments.get(design_plate, {}).get("direction")
         supplier_dir = supplier_assignments.get(plate_no, {}).get("direction")
         status = "OK" if (design_dir and supplier_dir and design_dir == supplier_dir) else "CHECK"
-        if design_dir or supplier_dir or design_plate:
+        # Always surface mapped rows so the report shows where detection is missing.
+        if design_plate or design_dir or supplier_dir:
             rows.append({
                 "plate": plate_no,
                 "design_plate": design_plate or "Not mapped",
@@ -1644,7 +1670,7 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
     if rows:
         result["note"] = "Prototype compares uploaded bearing symbols near detected plate centers in a lighter server-safe mode."
     else:
-        result["note"] = "Prototype could not assign bearing symbols to comparable plates."
+        result["note"] = "Prototype found plate mapping, but symbol detection did not produce comparable directions." if pairs else "Prototype could not assign bearing symbols to comparable plates."
     return result
 
 
