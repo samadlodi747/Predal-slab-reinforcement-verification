@@ -2090,6 +2090,18 @@ def generate():
             logo_path = os.path.join(temp_dir, f"company_logo{ext}")
             logo_file.save(logo_path)
 
+        design_bearing_path = None
+        if design_bearing_name:
+            ext = os.path.splitext(design_bearing_name)[1].lower()
+            design_bearing_path = os.path.join(temp_dir, f"design_bearing_symbol{ext}")
+            design_bearing_file.save(design_bearing_path)
+
+        supplier_bearing_path = None
+        if supplier_bearing_name:
+            ext = os.path.splitext(supplier_bearing_name)[1].lower()
+            supplier_bearing_path = os.path.join(temp_dir, f"supplier_bearing_symbol{ext}")
+            supplier_bearing_file.save(supplier_bearing_path)
+
         try:
             supplier = extract_supplier_data(supplier_path)
             design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
@@ -2107,14 +2119,28 @@ def generate():
                 "Try a cleaner PDF export or update the parser for this supplier layout."
             ), 400
 
-        bearing_result = extract_bearing_direction_prototype(
-            design_path,
-            supplier_path,
-            supplier.get("rows", []),
-            supplier_full_text=supplier.get("full_text", ""),
-            design_template_path=design_bearing_path,
-            supplier_template_path=supplier_bearing_path,
-        )
+        try:
+            bearing_result = extract_bearing_direction_prototype(
+                design_path,
+                supplier_path,
+                supplier.get("rows", []),
+                supplier_full_text=supplier.get("full_text", ""),
+                design_template_path=design_bearing_path,
+                supplier_template_path=supplier_bearing_path,
+            )
+        except Exception:
+            app.logger.exception("Bearing prototype failed")
+            bearing_result = {
+                "enabled": False,
+                "note": "Bearing prototype failed during processing. Report generated without bearing comparison.",
+                "rows": [],
+                "design_storey": None,
+                "compared_count": 0,
+                "ok_count": 0,
+                "check_count": 0,
+                "design_plate_centers": 0,
+                "supplier_plate_centers": 0,
+            }
 
         pdf_buffer = build_report_pdf_bytes(
             design,
