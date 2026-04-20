@@ -441,8 +441,17 @@ def normalize_grade(value):
 
 
 def parse_fire_rating(value):
-    m = re.search(r"REI\s*(\d+)", str(value or ""), re.I)
-    return int(m.group(1)) if m else None
+    txt = str(value or "")
+    m = re.search(r"\b(?:REI|RF|R)\s*[:=\-]?\s*(\d+)\b", txt, re.I)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d+)\s*(?:min|minutes|uur|hour|h)\b", txt, re.I)
+    if m:
+        val = int(m.group(1))
+        if re.search(r"\b(?:uur|hour|h)\b", txt, re.I) and val <= 6:
+            return val * 60
+        return val
+    return None
 
 
 def is_allowed_pdf_filename(filename):
@@ -542,7 +551,16 @@ def _extract_design_total_thickness_mm(text):
     if totals:
         return _most_common(totals)
 
-    # Prefer bk/ok level differences on predal notes: bk - ok = total slab thickness in cm.
+    # Common layout in design PDFs: "22 bk:+302 ok:+280 Predallen"
+    leading_notes = []
+    for m in re.finditer(r"\b(\d{1,2})\b\s*bk\s*:\s*[+\-]?\d+\s*ok\s*:\s*[+\-]?\d+\s*Predallen", txt, re.I):
+        val = int(m.group(1))
+        if 5 <= val <= 60:
+            leading_notes.append(val * 10)
+    if leading_notes:
+        return _most_common(leading_notes)
+
+    # Alternative layout: bk / ok first, then infer from level difference.
     diffs = []
     for m in re.finditer(r"bk\s*:\s*([+\-]?\d+)\s*ok\s*:\s*([+\-]?\d+)\s*Predallen", txt, re.I):
         try:
@@ -560,7 +578,6 @@ def _extract_design_total_thickness_mm(text):
         window = txt[max(0, m.start() - 120): m.end() + 20]
         nums = [int(n) for n in re.findall(r"\b(\d{1,2})\b", window) if 5 <= int(n) <= 60]
         if nums:
-            # Take the largest plausible thickness in the local window; avoids picking 8 from B8-150.
             notes.append(max(nums))
     if notes:
         return _most_common(notes) * 10
@@ -627,7 +644,7 @@ def extract_design_data(pdf_path, supplier_full_text=None):
     if mesh_hits:
         top_mesh = _most_common([m.upper() for m in mesh_hits])
 
-    fire_match = re.search(r"Brandweerstand:\s*([^\n]+)", full_text, re.I)
+    fire_match = re.search(r"ALGEMEENHEDEN BOVENBOUW.*?brandweerstand:\s*([^\n]+)", full_text, re.S | re.I)
     if fire_match:
         fire_req = clean_spaces(fire_match.group(1))
 
@@ -651,7 +668,9 @@ def extract_design_data(pdf_path, supplier_full_text=None):
 
 
 def detect_supplier_format(full_text):
-    txt = full_text.lower()
+    txt = (full_text or "").lower()
+    if "overzichtstabel breedvloerplaten" in txt or "van thuyne" in txt or "breedvloerplaten met benor-merk" in txt:
+        return "van_thuyne_table"
     if "oeterbeton" in txt or "o e t e r" in txt:
         return "oeterbeton_drawing"
     if "inclusief tralies" in txt and "glad" in txt and "rei" in txt:
@@ -661,16 +680,36 @@ def detect_supplier_format(full_text):
 
 def parse_common_supplier_meta(full_text, word_text=""):
     combined_text = f"{full_text}\n{word_text}".strip()
+    compact_text = " ".join(combined_text.split())
 
     concrete = None
-    concrete_matches = re.findall(r"\bC\d+/\d+\b", combined_text, re.I)
-    if concrete_matches:
-        concrete = concrete_matches[0].upper()
+    preferred_concrete_patterns = [
+        r"Betonkwaliteit van de platen\s*:\s*standaard\s*(C\d+/\d+)",
+        r"betonkwaliteit[^\n\.]{0,80}(C\d+/\d+)",
+        r"Opstorten\s*:\s*Vereiste betonkwaliteit[^\n\.]{0,80}(C\d+/\d+)",
+    ]
+    for pat in preferred_concrete_patterns:
+        m = re.search(pat, compact_text, re.I)
+        if m:
+            concrete = m.group(1).upper()
+            break
+    if not concrete:
+        concrete_matches = re.findall(r"\bC\d+/\d+\b", combined_text, re.I)
+        if concrete_matches:
+            def _concrete_key(value):
+                m = re.match(r"C(\d+)/(\d+)", str(value).upper())
+                return (int(m.group(1)), int(m.group(2))) if m else (10**9, 10**9)
+            concrete = sorted((c.upper() for c in concrete_matches), key=_concrete_key)[0]
 
     steel = None
-    m = re.search(r"\b(DE\s*500\s*BS|BE\s*500(?:ES|BS|TS)?|BE500(?:ES|BS|TS)?)\b", combined_text, re.I)
-    if m:
-        steel = clean_spaces(m.group(1)).upper().replace(" ", "")
+    steel_hits = re.findall(r"\b(DE\s*500\s*BS|BE\s*500(?:ES|BS|TS)?|BE500(?:ES|BS|TS)?)\b", combined_text, re.I)
+    if steel_hits:
+        unique_hits = []
+        for hit in steel_hits:
+            normalized = clean_spaces(hit).upper().replace(" ", "")
+            if normalized not in unique_hits:
+                unique_hits.append(normalized)
+        steel = " / ".join(unique_hits)
     else:
         steel_patterns = [
             r"Wapening\s*:\s*staalkwaliteit\s*([^\n\.]+)",
@@ -685,19 +724,36 @@ def parse_common_supplier_meta(full_text, word_text=""):
 
     top_mesh_note = None
     for pat in [
-        r"Bovenwapening\s*:\s*(Zie studieplan|Wordt niet meegeleverd|[^\n\.]{1,80})",
-        r"Armatures sup[ée]rieures\s*:\s*(Voir plan de l[' ]ing[ée]nieur|[^\n\.]{1,80})",
+        r"Bovenwapening\s*:\s*(Zie studieplan|Wordt niet meegeleverd|[^\n\.]{1,120})",
+        r"Armatures sup[ée]rieures\s*:\s*(Voir plan de l[' ]ing[ée]nieur|[^\n\.]{1,120})",
+        r"boven[\-\s]?wapeningsnet\s*150\s*/\s*150\s*/\s*(\d+)\s*/\s*(\d+)",
     ]:
-        m = re.search(pat, combined_text, re.I)
+        m = re.search(pat, compact_text if "boven" in pat else combined_text, re.I)
         if m:
-            top_mesh_note = clean_spaces(m.group(1))
+            if len(m.groups()) == 2 and m.group(1) == m.group(2):
+                top_mesh_note = f"B{m.group(1)}-150"
+            else:
+                top_mesh_note = clean_spaces(m.group(1))
             if top_mesh_note:
                 break
 
     fire = None
-    m = re.search(r"(REI\s*\d+)", combined_text, re.I)
-    if m:
-        fire = clean_spaces(m.group(1)).upper()
+    fire_patterns = [
+        r"(REI\s*\d+)",
+        r"Standaard brandweerstand\s*(\d+)\s*uur",
+        r"\bRf\s*min\b",
+    ]
+    for pat in fire_patterns:
+        m = re.search(pat, compact_text, re.I)
+        if not m:
+            continue
+        if pat == r"Standaard brandweerstand\s*(\d+)\s*uur":
+            fire = f"R{int(m.group(1)) * 60}"
+        elif pat == r"\bRf\s*min\b":
+            fire = "R60"
+        else:
+            fire = clean_spaces(m.group(1)).upper()
+        break
 
     return {"concrete": concrete, "supplier_steel": steel, "top_mesh_note": top_mesh_note, "fire_default": fire}
 
@@ -707,6 +763,100 @@ def finalize_row(row):
     row["dwars_cm2m"] = round(row["dwars_mm2m"] / 100.0, 2)
     row["plate_size"] = f"{row['length']} x {row['width']}"
     return row
+
+
+
+def _int_from_text(value):
+    m = re.search(r"-?\d+", str(value or "").replace("±", ""))
+    return int(m.group(0)) if m else None
+
+
+def _split_nonempty_lines(value):
+    return [ln.strip() for ln in str(value or "").splitlines() if ln and ln.strip()]
+
+
+def parse_van_thuyne_table(pdf_path, full_text):
+    meta = parse_common_supplier_meta(full_text)
+    rows = []
+
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                try:
+                    tables = page.find_tables().tables
+                except Exception:
+                    tables = []
+
+                for table in tables:
+                    try:
+                        data = table.extract()
+                    except Exception:
+                        continue
+                    if not data or len(data) < 3:
+                        continue
+
+                    header_blob = " ".join(
+                        " ".join("" if cell is None else str(cell) for cell in row)
+                        for row in data[:3]
+                    )
+                    if "Overzichtstabel Breedvloerplaten" not in header_blob:
+                        continue
+
+                    table_row = data[2]
+                    if len(table_row) < 12:
+                        continue
+
+                    columns = [_split_nonempty_lines(cell) for cell in table_row[:12]]
+                    lengths = [len(col) for col in columns[:10] if col]
+                    if not lengths:
+                        continue
+                    row_count = max(lengths)
+
+                    for col in columns:
+                        if len(col) < row_count:
+                            col.extend([None] * (row_count - len(col)))
+
+                    for i in range(row_count):
+                        plate = _int_from_text(columns[0][i])
+                        predal_cm = _int_from_text(columns[1][i])
+                        total_cm = _int_from_text(columns[3][i])
+                        length_cm = _int_from_text(columns[5][i])
+                        width_cm = _int_from_text(columns[6][i])
+                        fire_min = _int_from_text(columns[7][i])
+                        langs_mm2m = _int_from_text(columns[8][i])
+                        dwars_mm2m = _int_from_text(columns[9][i])
+
+                        if None in (plate, predal_cm, total_cm, length_cm, width_cm, langs_mm2m, dwars_mm2m):
+                            continue
+
+                        row = {
+                            "plate": plate,
+                            "article": None,
+                            "tralie_h": _int_from_text(columns[10][i]) if len(columns) > 10 else None,
+                            "floor_thk": total_cm * 10,
+                            "length": length_cm * 10,
+                            "predal_thk": predal_cm * 10,
+                            "width": width_cm * 10,
+                            "langs_mm2m": langs_mm2m,
+                            "dwars_mm2m": dwars_mm2m,
+                            "weight_kg": _int_from_text(columns[11][i]) if len(columns) > 11 else None,
+                            "type": columns[4][i] if len(columns) > 4 else None,
+                            "uw1": None,
+                            "uw2": None,
+                            "cover": None,
+                            "fire": (f"R{fire_min}" if fire_min is not None else meta.get("fire_default")),
+                            "env": "EE2" if re.search(r"Omgevingsklasse\s*EE2", full_text or "", re.I) else None,
+                            "concrete": meta.get("concrete"),
+                            "supplier_format": "Van Thuyne overview table parser",
+                        }
+                        rows.append(finalize_row(row))
+    except Exception:
+        rows = []
+
+    rows.sort(key=lambda x: x["plate"])
+    meta["rows"] = rows
+    meta["supplier_format"] = "Van Thuyne overview table parser"
+    return meta
 
 
 def parse_predalco_table(pages, full_text):
@@ -947,14 +1097,19 @@ def extract_supplier_data(pdf_path):
     pages, full_text = read_pdf(pdf_path)
     supplier_format = detect_supplier_format(full_text)
 
-    predalco_data = parse_predalco_table(pages, full_text)
-    if predalco_data["rows"]:
-        data = predalco_data
-        supplier_format = "predalco_table"
-    elif supplier_format == "oeterbeton_drawing":
-        data = parse_drawing_supplier(pages, full_text, "Oeterbeton drawing parser")
+    van_thuyne_data = parse_van_thuyne_table(pdf_path, full_text)
+    if van_thuyne_data["rows"]:
+        data = van_thuyne_data
+        supplier_format = "van_thuyne_table"
     else:
-        data = parse_drawing_supplier(pages, full_text, "Generic drawing parser")
+        predalco_data = parse_predalco_table(pages, full_text)
+        if predalco_data["rows"]:
+            data = predalco_data
+            supplier_format = "predalco_table"
+        elif supplier_format == "oeterbeton_drawing":
+            data = parse_drawing_supplier(pages, full_text, "Oeterbeton drawing parser")
+        else:
+            data = parse_drawing_supplier(pages, full_text, "Generic drawing parser")
 
     data["full_text"] = full_text
     data["detected_supplier_format"] = supplier_format
