@@ -1287,7 +1287,7 @@ def _direction_label(code):
     return mapping.get(code, str(code or "Not found"))
 
 
-def _render_page_gray(page, zoom=2.0):
+def _render_page_gray(page, zoom=1.25):
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n == 4:
@@ -1570,6 +1570,9 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
         "design_plate_centers": 0,
         "supplier_plate_centers": 0,
     }
+    if os.environ.get("DISABLE_BEARING_PROTOTYPE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        result["note"] = "Bearing prototype disabled by server setting."
+        return result
     if not design_template_path or not supplier_template_path:
         result["note"] = "Bearing prototype skipped: both symbol templates were not uploaded."
         return result
@@ -1587,10 +1590,10 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
 
     with fitz.open(design_pdf_path) as ddoc:
         dpage = ddoc[design_page_index or 0]
-        dgray, dzoom = _render_page_gray(dpage, zoom=2.0)
+        dgray, dzoom = _render_page_gray(dpage, zoom=1.25)
     with fitz.open(supplier_pdf_path) as sdoc:
         spage = sdoc[0]
-        sgray, szoom = _render_page_gray(spage, zoom=2.0)
+        sgray, szoom = _render_page_gray(spage, zoom=1.25)
         supplier_plan_bbox = _extract_supplier_plan_bbox(spage)
 
     d_search = None
@@ -1598,8 +1601,10 @@ def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supp
         d_search = tuple(v * dzoom for v in design_plan_bbox)
     s_search = tuple(v * szoom for v in supplier_plan_bbox) if supplier_plan_bbox else None
 
-    design_matches = _find_symbol_matches(dgray, design_template_path, expected_count=max(1, len(design_centers)), search_bbox=d_search)
-    supplier_matches = _find_symbol_matches(sgray, supplier_template_path, expected_count=max(1, len(supplier_centers)), search_bbox=s_search)
+    design_expected = min(max(1, len(design_centers)), 20)
+    supplier_expected_count = min(max(1, len(supplier_centers)), 20)
+    design_matches = _find_symbol_matches(dgray, design_template_path, expected_count=design_expected, search_bbox=d_search)
+    supplier_matches = _find_symbol_matches(sgray, supplier_template_path, expected_count=supplier_expected_count, search_bbox=s_search)
 
     scaled_design_centers = {k: (v[0] * dzoom, v[1] * dzoom) for k, v in design_centers.items()}
     scaled_supplier_centers = {k: (v[0] * szoom, v[1] * szoom) for k, v in supplier_centers.items()}
