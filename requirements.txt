@@ -1,6 +1,6 @@
 Flask
 gunicorn
-pymupdf
+pymupdf>=1.27.2.2
 reportlab
 numpy
 opencv-python-headless
