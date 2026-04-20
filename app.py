@@ -462,17 +462,35 @@ def is_allowed_logo_filename(filename):
     return str(filename or "").lower().endswith((".png", ".jpg", ".jpeg"))
 
 
+
 def normalize_storey_key(text):
     txt = (text or "").upper()
     compact = re.sub(r"\s+", "", txt)
+    normalized = re.sub(r"[\r\n\t]+", " ", txt)
+
     if "FUNDERINGSPLAAT" in compact or "FUNDERING" in compact:
         return "FOUNDATION"
-    for pat in [r"NIV\+?(-?\d+)", r"BOVEN\+?(-?\d+)", r"NIVEAU\+?(-?\d+)", r"LEVEL\+?(-?\d+)"]:
+
+    explicit_patterns = [
+        (r"\b(?:AFDEK\.?\s*)?GELIJKVLOERS\b", "LEVEL_0"),
+        (r"\bGROUND\s*FLOOR\b", "LEVEL_0"),
+        (r"\b(?:RDC|REZ(?:-DE-CHAUSSEE)?)\b", "LEVEL_0"),
+        (r"\b(?:BK|NIV|NIVEAU|BOVEN|LEVEL)\s*\+?0\b", "LEVEL_0"),
+        (r"\b(?:GL|GV)\b", "LEVEL_0"),
+        (r"\b(?:1(?:STE|E)?\s+VERDIEPING|VERDIEP(?:ING)?\s*\+?1|BOVEN\s*\+?1|LEVEL\s*\+?1|BK\s*\+?1|NIV(?:EAU)?\s*\+?1|ETAGE\s*1)\b", "LEVEL_1"),
+        (r"\b(?:2(?:DE|E)?\s+VERDIEPING|VERDIEP(?:ING)?\s*\+?2|BOVEN\s*\+?2|LEVEL\s*\+?2|BK\s*\+?2|NIV(?:EAU)?\s*\+?2|ETAGE\s*2)\b", "LEVEL_2"),
+        (r"\b(?:DAK|PLAT\s*DAK|ROOF)\b", "ROOF"),
+        (r"\b(?:KELDER|SOUTERRAIN|BASEMENT)\b", "LEVEL_-1"),
+    ]
+    for pattern, value in explicit_patterns:
+        if re.search(pattern, normalized, re.I):
+            return value
+
+    for pat in [r"NIV\+?(-?\d+)", r"BOVEN\+?(-?\d+)", r"NIVEAU\+?(-?\d+)", r"LEVEL\+?(-?\d+)", r"BK\+?(-?\d+)"]:
         m = re.search(pat, compact)
         if m:
             return f"LEVEL_{m.group(1)}"
     return None
-
 
 
 
@@ -508,7 +526,7 @@ def _storey_plate_prefix(storey_hint):
     except Exception:
         return None
     if lvl < 0:
-        return None
+        return f"B-{abs(lvl)}."
     return f"B{lvl}."
 
 def _collect_storey_local_text(pages, storey_hint):
@@ -527,18 +545,90 @@ def _collect_storey_local_text(pages, storey_hint):
     if not prefix:
         return ""
 
-    prefix_re = re.compile(rf"\b{re.escape(prefix)}\d+\b", re.I)
+    prefix_re = re.compile(rf"\b{re.escape(prefix)}\d+[A-Z]?\b", re.I)
 
     for page in pages:
         blocks = page["blocks"]
         storey_blocks = [b for b in blocks if prefix_re.search(clean_spaces(b[4]))]
         if not storey_blocks:
             continue
-        zone = _bbox_expand(_bbox_union(storey_blocks), dx=220, dy=220)
+        zone = _bbox_expand(_bbox_union(storey_blocks), dx=320, dy=320)
         local_blocks = [b for b in blocks if _bbox_intersects((b[0], b[1], b[2], b[3]), zone)]
         local_text_parts.extend(clean_spaces(b[4]) for b in local_blocks if clean_spaces(b[4]))
 
     return "\n".join(local_text_parts)
+
+
+def _extract_storey_regions(pages):
+    regions = {}
+
+    for page_index, page in enumerate(pages):
+        blocks = page["blocks"]
+        anchors_by_storey = {}
+
+        for block in blocks:
+            txt = clean_spaces(block[4])
+            for m in re.finditer(r"\bB(-?\d+)\.\d+[A-Z]?\b", txt, re.I):
+                hint = f"LEVEL_{m.group(1)}"
+                anchors_by_storey.setdefault(hint, []).append(block)
+
+        for hint, anchors in anchors_by_storey.items():
+            zone = _bbox_expand(_bbox_union(anchors), dx=320, dy=320)
+            local_blocks = [b for b in blocks if _bbox_intersects((b[0], b[1], b[2], b[3]), zone)]
+            region = regions.setdefault(hint, {"blocks": [], "page_indexes": set(), "anchor_blocks": []})
+            region["blocks"].extend(local_blocks)
+            region["anchor_blocks"].extend(anchors)
+            region["page_indexes"].add(page_index)
+
+    for hint, region in regions.items():
+        unique = []
+        seen = set()
+        for b in region["blocks"]:
+            key = (round(b[0], 2), round(b[1], 2), round(b[2], 2), round(b[3], 2), clean_spaces(b[4]))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(b)
+        region["blocks"] = unique
+        region["text"] = "\n".join(clean_spaces(b[4]) for b in unique if clean_spaces(b[4]))
+        families = set()
+        for b in unique:
+            families |= _parse_design_families_from_text(clean_spaces(b[4]))
+        if not families:
+            families |= _parse_design_families_from_text(region["text"])
+        region["families"] = sorted(families)
+        region["bbox"] = _bbox_union(unique) if unique else None
+
+    return regions
+
+
+def _select_storey_region(storey_regions, supplier_full_text):
+    hinted = normalize_storey_key(supplier_full_text or "")
+    if hinted == "ROOF":
+        numeric = []
+        for key in storey_regions:
+            m = re.match(r"LEVEL_(-?\d+)$", key)
+            if m:
+                numeric.append((int(m.group(1)), key))
+        if numeric:
+            numeric.sort()
+            return numeric[-1][1], "supplier_text_roof"
+        return None, "supplier_text_roof"
+
+    if hinted and hinted in storey_regions:
+        return hinted, "supplier_text"
+
+    if hinted == "LEVEL_-1" and hinted in storey_regions:
+        return hinted, "supplier_text"
+
+    if len(storey_regions) == 1:
+        return next(iter(storey_regions.keys())), "single_design_storey"
+
+    normalized = re.sub(r"[\r\n\t]+", " ", str(supplier_full_text or "").upper())
+    if re.search(r"\b(?:GELIJKVLOERS|GROUND\s*FLOOR|RDC|REZ(?:-DE-CHAUSSEE)?|GL|GV)\b", normalized) and "LEVEL_0" in storey_regions:
+        return "LEVEL_0", "supplier_keyword"
+
+    return None, "full_document"
 
 
 def _pages_word_text(pages):
@@ -582,6 +672,7 @@ def _extract_design_total_thickness_mm(text):
     if notes:
         return _most_common(notes) * 10
     return None
+
 def _family_pattern():
     return re.compile(
         r"HW\s*([0-9]+(?:[\.,][0-9]+)?)\s*cm[²2]/l[mn]"
@@ -608,21 +699,35 @@ def _parse_design_families_from_text(text):
 
 def extract_design_data(pdf_path, supplier_full_text=None):
     pages, full_text = read_pdf(pdf_path)
-    storey_hint = normalize_storey_key(supplier_full_text or "")
+    storey_regions = _extract_storey_regions(pages)
+    storey_hint, storey_match_method = _select_storey_region(storey_regions, supplier_full_text or "")
 
-    local_text = _collect_storey_local_text(pages, storey_hint)
+    local_blocks = []
+    local_text = ""
+
+    if storey_hint and storey_hint in storey_regions:
+        region = storey_regions[storey_hint]
+        local_blocks = list(region.get("blocks", []))
+        local_text = region.get("text", "")
+
     search_text = local_text or full_text
 
     families = set()
+    for block in local_blocks:
+        families |= _parse_design_families_from_text(clean_spaces(block[4]))
 
-    if local_text:
+    if not families and local_text:
         families |= _parse_design_families_from_text(local_text)
+
+    if not families and storey_regions:
+        for region in storey_regions.values():
+            for fam in region.get("families", []):
+                families.add(tuple(fam))
 
     if not families:
         for page in pages:
             for block in page["blocks"]:
-                block_text = clean_spaces(block[4])
-                families |= _parse_design_families_from_text(block_text)
+                families |= _parse_design_families_from_text(clean_spaces(block[4]))
 
     if not families:
         families |= _parse_design_families_from_text(full_text)
@@ -662,6 +767,8 @@ def extract_design_data(pdf_path, supplier_full_text=None):
         "supplier_det_note": supplier_det_note,
         "full_text": full_text,
         "storey_hint": storey_hint,
+        "storey_match_method": storey_match_method,
+        "available_storeys": sorted(storey_regions.keys()),
         "local_text": local_text,
         "total_thickness_mm": total_thickness_mm,
     }
@@ -1117,27 +1224,49 @@ def extract_supplier_data(pdf_path):
 
 
 
+
+def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.10):
+    supplier_hw = float(row.get("langs_cm2m") or 0.0)
+    supplier_dw = float(row.get("dwars_cm2m") or 0.0)
+    candidates = []
+
+    for fam in design_families or []:
+        hw, dw, vw_d, vw_l = fam
+        if supplier_hw + rounding_tol >= hw and supplier_dw + rounding_tol >= dw:
+            surplus = (supplier_hw - hw) + 0.35 * (supplier_dw - dw)
+            candidates.append((surplus, -hw, -dw, fam))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    return candidates[0][3]
+
+
 def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
     rows = supplier["rows"]
-    design_family_map = {(hw, dw): (vw_d, vw_l) for hw, dw, vw_d, vw_l in design["families"]}
+    design_families = list(design.get("families", []))
 
     comparison_rows = []
-    exact_ok = 0
+    matched_ok = 0
     for row in rows:
-        pair = (row["langs_cm2m"], row["dwars_cm2m"])
-        is_exact = pair in design_family_map
-        row["status"] = "OK" if is_exact else "CHECK"
-        if is_exact:
-            exact_ok += 1
+        matched_family = _match_design_family_for_supplier_row(row, design_families)
+        is_match = matched_family is not None
+        row["status"] = "OK" if is_match else "CHECK"
+        row["matched_design_family"] = matched_family
+        if is_match:
+            matched_ok += 1
+
+        if matched_family:
+            design_note = f"HW {matched_family[0]:.2f} / DW {matched_family[1]:.2f}"
+        else:
+            design_note = "No readable family match on selected design storey"
+
         comparison_rows.append(
             [
                 str(row["plate"]),
                 row["plate_size"],
-                (
-                    f"HW {row['langs_cm2m']:.2f} / DW {row['dwars_cm2m']:.2f}"
-                    if is_exact
-                    else "No exact family found on design sheet"
-                ),
+                design_note,
                 f"Langs {row['langs_mm2m']} / Dwars {row['dwars_mm2m']}",
                 row["status"],
             ]
@@ -1191,6 +1320,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
 
     global_rows = [
         ["Detected supplier parser", "Auto detection", supplier.get("supplier_format", "Not found"), "OK" if rows else "CHECK"],
+        ["Selected design storey", design.get("storey_hint") or "Full document fallback", design.get("storey_match_method") or "-", "OK" if design.get("storey_hint") else "CHECK"],
         ["Concrete class", f"{design['concrete'] or 'Not found'} minimum", ", ".join(supplier_concretes) or "Not found", concrete_status],
         ["Steel grade", design["steel"] or "Not found", supplier["supplier_steel"] or "Not found", steel_status],
         ["Predal thickness", "Supplier to determine (design note)" if design["supplier_det_note"] else "Design note not found", ", ".join(str(v) for v in predal_thicknesses) + " mm" if predal_thicknesses else "Not found", predal_status],
@@ -1218,10 +1348,11 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
 
     sanity_lines = [
         f"Detected parser: {supplier.get('supplier_format', 'Unknown')}.",
+        f"Selected design storey: {design.get('storey_hint') or 'full document'} ({design.get('storey_match_method') or '-'}).",
         f"Parsed supplier plates: {len(rows)}." if rows else "No supplier plates could be parsed from the supplier PDF.",
-        f"Exact family matches: {exact_ok} / {len(rows)}." if rows else "No plate-by-plate comparison could be completed.",
+        f"Readable family matches: {matched_ok} / {len(rows)}." if rows else "No plate-by-plate comparison could be completed.",
         f"Transverse reinforcement minimum check (>= 1/5 of main and >= 2.50 cm²/m): {'OK' if dwars_ok and all(dwars_ok) else 'CHECK'}.",
-        "Exact geometric zone mapping and span-direction verification still require engineer review on the full drawing set.",
+        "Geometric zone mapping, span direction, and supplier-specific plate splitting still require engineer review on the full drawing set.",
     ]
     if bin_lines:
         sanity_lines.append("Length-based reinforcement trend: " + " | ".join(bin_lines))
@@ -1231,7 +1362,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     supplier_total_note = ", ".join(str(v) for v in total_thicknesses) + " mm" if total_thicknesses else "not found"
 
     conclusion_lines = [
-        f"Plate-by-plate reinforcement check: {exact_ok} of {len(rows)} parsed supplier plates satisfy the exact readable design reinforcement family comparison." if rows else "Plate-by-plate reinforcement check: no supplier plates could be validated automatically.",
+        f"Plate-by-plate reinforcement check: {matched_ok} of {len(rows)} parsed supplier plates satisfy the selected design-storey readable family comparison." if rows else "Plate-by-plate reinforcement check: no supplier plates could be validated automatically.",
         f"Concrete check: supplier provides {', '.join(supplier_concretes) or 'not found'} against design minimum {design['concrete'] or 'not found'}; status {concrete_status}.",
         f"Build-up check: supplier predal thickness {supplier_predal_note} and total slab thickness {supplier_total_note} compared with the design note {design_total_note}; status {total_status}.",
         f"Mesh and fire review: design mesh requirement {design['top_mesh'] or 'not found'} and fire note {design['fire_req'] or 'not found'} should still be visually checked against the complete supplier drawing and architectural package.",
