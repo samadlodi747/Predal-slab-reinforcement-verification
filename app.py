@@ -8,11 +8,6 @@ import tempfile
 from statistics import mean
 
 import fitz
-import numpy as np
-try:
-    import cv2
-except Exception:
-    cv2 = None
 from flask import Flask, render_template_string, request, send_file
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
@@ -323,30 +318,6 @@ INDEX_HTML = """
               <input class="hidden-input" type="file" id="company_logo" name="company_logo" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
               <div class="file-meta" id="logoMeta">No logo selected</div>
             </div>
-
-            <div class="upload-card">
-              <h3>Design bearing symbol</h3>
-              <p>Optional prototype input</p>
-              <label class="dropzone" for="design_bearing_symbol" id="designBearingDrop">
-                <div class="icon">↔️</div>
-                <strong>Choose or drop file</strong>
-                <span>PNG or JPG</span>
-              </label>
-              <input class="hidden-input" type="file" id="design_bearing_symbol" name="design_bearing_symbol" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
-              <div class="file-meta" id="designBearingMeta">No symbol selected</div>
-            </div>
-
-            <div class="upload-card">
-              <h3>Supplier bearing symbol</h3>
-              <p>Optional prototype input</p>
-              <label class="dropzone" for="supplier_bearing_symbol" id="supplierBearingDrop">
-                <div class="icon">↕️</div>
-                <strong>Choose or drop file</strong>
-                <span>PNG or JPG</span>
-              </label>
-              <input class="hidden-input" type="file" id="supplier_bearing_symbol" name="supplier_bearing_symbol" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
-              <div class="file-meta" id="supplierBearingMeta">No symbol selected</div>
-            </div>
           </div>
 
           <div class="actions">
@@ -415,8 +386,6 @@ INDEX_HTML = """
     bindDropzone("design_pdf", "designMeta", "designDrop", "pdf");
     bindDropzone("supplier_pdf", "supplierMeta", "supplierDrop", "pdf");
     bindDropzone("company_logo", "logoMeta", "logoDrop", "logo");
-    bindDropzone("design_bearing_symbol", "designBearingMeta", "designBearingDrop", "logo");
-    bindDropzone("supplier_bearing_symbol", "supplierBearingMeta", "supplierBearingDrop", "logo");
 
     function setClientDateFields(){
       const dateField = document.getElementById("client_local_date");
@@ -1274,407 +1243,7 @@ def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.1
     return candidates[0][3]
 
 
-
-def _direction_label(code):
-    mapping = {
-        "left_to_right": "Left to Right",
-        "right_to_left": "Right to Left",
-        "top_to_bottom": "Top to Bottom",
-        "bottom_to_top": "Bottom to Top",
-        None: "Not found",
-        "": "Not found",
-    }
-    return mapping.get(code, str(code or "Not found"))
-
-
-def _render_page_gray(page, zoom=0.85):
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    if pix.n == 4:
-        arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-    else:
-        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-    max_side = 2200
-    h, w = gray.shape[:2]
-    if max(h, w) > max_side:
-        scale = max_side / float(max(h, w))
-        gray = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
-        zoom *= scale
-    return gray, zoom
-
-
-def _trim_template(gray):
-    if gray is None or gray.size == 0:
-        return gray
-    _, th = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY_INV)
-    coords = cv2.findNonZero(th)
-    if coords is None:
-        return gray
-    x, y, w, h = cv2.boundingRect(coords)
-    return gray[y:y + h, x:x + w]
-
-
-def _rotate_template(gray, angle):
-    if angle == 0:
-        return gray
-    if angle == 90:
-        return cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
-    if angle == 180:
-        return cv2.rotate(gray, cv2.ROTATE_180)
-    if angle == 270:
-        return cv2.rotate(gray, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    return gray
-
-
-def _bbox_contains_point(bbox, pt):
-    x0, y0, x1, y1 = bbox
-    return x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1
-
-
-def _load_bearing_template(template_path):
-    if cv2 is None or not template_path:
-        return None
-    template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-    if template is None or template.size == 0:
-        return None
-    template = _trim_template(template)
-    if template is None or template.size == 0:
-        return None
-    max_side = 180
-    h, w = template.shape[:2]
-    if max(h, w) > max_side:
-        scale = max_side / float(max(h, w))
-        template = cv2.resize(template, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
-    return template
-
-
-
-def _find_best_symbol_near_center(gray_page, template_gray, center, window=260):
-    if cv2 is None or template_gray is None or center is None:
-        return None
-
-    cx, cy = int(center[0]), int(center[1])
-    x0 = max(0, cx - window)
-    y0 = max(0, cy - window)
-    x1 = min(gray_page.shape[1], cx + window)
-    y1 = min(gray_page.shape[0], cy + window)
-    if x1 <= x0 or y1 <= y0:
-        return None
-
-    roi = gray_page[y0:y1, x0:x1]
-    if roi.size == 0 or min(roi.shape[:2]) < 20:
-        return None
-
-    # Normalize contrast lightly: this makes scans / screenshots more stable.
-    roi_eq = cv2.equalizeHist(roi)
-    page_edges = cv2.Canny(roi_eq, 40, 140)
-
-    direction_map = {
-        0: "left_to_right",
-        90: "top_to_bottom",
-        180: "right_to_left",
-        270: "bottom_to_top",
-    }
-
-    best = None
-    # Wider but still lightweight scale range to tolerate different uploaded crop sizes.
-    scales = [0.65, 0.8, 1.0, 1.2]
-    for angle in [0, 90, 180, 270]:
-        rotated = _rotate_template(template_gray, angle)
-        rotated = cv2.equalizeHist(rotated)
-        for scale in scales:
-            w = max(14, int(rotated.shape[1] * scale))
-            h = max(14, int(rotated.shape[0] * scale))
-            if w >= roi.shape[1] or h >= roi.shape[0]:
-                continue
-            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-            resized = cv2.resize(rotated, (w, h), interpolation=interp)
-            temp_edges = cv2.Canny(resized, 40, 140)
-            if temp_edges.size == 0:
-                continue
-
-            # Edge match is robust to color differences.
-            res_edges = cv2.matchTemplate(page_edges, temp_edges, cv2.TM_CCOEFF_NORMED)
-            _, max_val_edges, _, max_loc_edges = cv2.minMaxLoc(res_edges)
-
-            # Gray match helps when edges are too sparse.
-            res_gray = cv2.matchTemplate(roi_eq, resized, cv2.TM_CCOEFF_NORMED)
-            _, max_val_gray, _, max_loc_gray = cv2.minMaxLoc(res_gray)
-
-            if max_val_edges >= max_val_gray:
-                score = float(max_val_edges)
-                max_loc = max_loc_edges
-            else:
-                score = float(max_val_gray)
-                max_loc = max_loc_gray
-
-            if score < 0.34:
-                continue
-
-            x, y = max_loc
-            cand = {
-                "score": round(score, 4),
-                "bbox": (x + x0, y + y0, x + w + x0, y + h + y0),
-                "center": (x + x0 + w / 2.0, y + y0 + h / 2.0),
-                "direction": direction_map[angle],
-            }
-            if best is None or cand["score"] > best["score"]:
-                best = cand
-    return best
-
-
-def _extract_supplier_plan_bbox(page):
-    blue_rects = []
-    for drawing in page.get_drawings():
-        rect = drawing.get("rect")
-        color = drawing.get("color")
-        if not rect or not color:
-            continue
-        if color[0] < 0.15 and color[1] < 0.15 and color[2] > 0.85:
-            blue_rects.append(rect)
-    if blue_rects:
-        return (min(r.x0 for r in blue_rects), min(r.y0 for r in blue_rects), max(r.x1 for r in blue_rects), max(r.y1 for r in blue_rects))
-    return (0.0, 0.0, float(page.rect.width), float(page.rect.height))
-
-
-def _extract_supplier_plate_centers_for_bearing(pdf_path, expected_numbers):
-    plate_centers = {}
-    with fitz.open(pdf_path) as doc:
-        page = doc[0]
-        words = page.get_text("words", sort=True)
-        plan_bbox = _extract_supplier_plan_bbox(page)
-
-        for drawing in page.get_drawings():
-            rect = drawing.get("rect")
-            color = drawing.get("color")
-            items = drawing.get("items") or []
-            if not rect or not color:
-                continue
-            ops = "".join(item[0] for item in items)
-            if ops != "cccc":
-                continue
-            if not (7.0 <= rect.width <= 12.5 and 18.0 <= rect.height <= 23.5):
-                continue
-            if not (color[0] < 0.2 and color[1] < 0.2 and color[2] < 0.2):
-                continue
-            center = ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
-            if not _bbox_contains_point(plan_bbox, center):
-                continue
-            ex = fitz.Rect(rect.x0 - 5, rect.y0 - 5, rect.x1 + 5, rect.y1 + 5)
-            hits = []
-            for word in words:
-                wr = fitz.Rect(word[:4])
-                txt = str(word[4]).strip()
-                if ex.intersects(wr) and re.fullmatch(r"\d{1,2}", txt):
-                    n = int(txt)
-                    if n in expected_numbers:
-                        hits.append(n)
-            if len(hits) == 1 and hits[0] not in plate_centers:
-                plate_centers[hits[0]] = center
-
-    return plate_centers
-
-
-def _extract_design_plate_centers_for_bearing(pdf_path, supplier_full_text):
-    pages, _ = read_pdf(pdf_path)
-    storey_regions = _extract_storey_regions(pages)
-    storey_hint, _ = _select_storey_region(storey_regions, supplier_full_text or "")
-    prefix = _storey_plate_prefix(storey_hint)
-    if not prefix or not storey_hint or storey_hint not in storey_regions:
-        return {}, None, None, 0
-
-    page_indexes = sorted(storey_regions[storey_hint].get("page_indexes", []))
-    page_index = page_indexes[0] if page_indexes else 0
-
-    with fitz.open(pdf_path) as doc:
-        page = doc[page_index]
-        blocks = page.get_text("blocks", sort=True)
-        words = page.get_text("words", sort=True)
-
-    anchor_blocks = []
-    for block in blocks:
-        txt = clean_spaces(block[4])
-        if re.search(r"\bPredallen\b", txt, re.I) or re.search(r"\bHW\s*[0-9]", txt, re.I):
-            anchor_blocks.append(block)
-
-    if anchor_blocks:
-        plan_bbox = _bbox_expand(_bbox_union(anchor_blocks), dx=250, dy=250)
-    else:
-        region_bbox = storey_regions[storey_hint].get("bbox")
-        plan_bbox = _bbox_expand(region_bbox, dx=100, dy=100) if region_bbox else None
-
-    plate_centers = {}
-    prefix_re = re.compile(rf"({re.escape(prefix)}\d+[A-Z]?)[:;]?$", re.I)
-    if plan_bbox:
-        for word in words:
-            wr = (word[0], word[1], word[2], word[3])
-            txt = str(word[4]).strip()
-            m = prefix_re.match(txt)
-            if not m:
-                continue
-            cx = (word[0] + word[2]) / 2.0
-            cy = (word[1] + word[3]) / 2.0
-            if _bbox_contains_point(plan_bbox, (cx, cy)):
-                plate_centers[m.group(1).upper()] = (cx, cy)
-
-    return plate_centers, plan_bbox, storey_hint, page_index
-
-
-def _normalize_point(pt, bbox):
-    x0, y0, x1, y1 = bbox
-    w = max(1.0, x1 - x0)
-    h = max(1.0, y1 - y0)
-    return ((pt[0] - x0) / w, (pt[1] - y0) / h)
-
-
-def _pair_supplier_to_design_regions(supplier_centers, supplier_bbox, design_centers, design_bbox):
-    pairs = {}
-    if not supplier_centers or not design_centers or not supplier_bbox or not design_bbox:
-        return pairs
-    for plate_no, center in supplier_centers.items():
-        sn = _normalize_point(center, supplier_bbox)
-        best = None
-        for design_plate, d_center in design_centers.items():
-            dn = _normalize_point(d_center, design_bbox)
-            dist = math.hypot(sn[0] - dn[0], sn[1] - dn[1])
-            if best is None or dist < best[0]:
-                best = (dist, design_plate)
-        if best:
-            pairs[plate_no] = {"design_plate": best[1], "distance": round(best[0], 4)}
-    return pairs
-
-
-def _assign_symbol_matches_to_centers(matches, centers, bbox):
-    assignments = {}
-    if not matches or not centers or not bbox:
-        return assignments
-    max_dist = max(60.0, min(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.22)
-    remaining = dict(centers)
-    for match in sorted(matches, key=lambda item: item["score"], reverse=True):
-        best = None
-        for key, center in remaining.items():
-            dist = math.hypot(center[0] - match["center"][0], center[1] - match["center"][1])
-            if best is None or dist < best[0]:
-                best = (dist, key)
-        if best and best[0] <= max_dist:
-            key = best[1]
-            assignments[key] = {
-                "direction": match["direction"],
-                "score": round(match["score"], 3),
-                "center": match["center"],
-            }
-            remaining.pop(key, None)
-    return assignments
-
-
-def extract_bearing_direction_prototype(design_pdf_path, supplier_pdf_path, supplier_rows, supplier_full_text="", design_template_path=None, supplier_template_path=None):
-    result = {
-        "enabled": False,
-        "note": "",
-        "rows": [],
-        "design_storey": None,
-        "compared_count": 0,
-        "ok_count": 0,
-        "check_count": 0,
-        "design_plate_centers": 0,
-        "supplier_plate_centers": 0,
-    }
-    if os.environ.get("DISABLE_BEARING_PROTOTYPE", "").strip().lower() in {"1", "true", "yes", "on"}:
-        result["note"] = "Bearing prototype disabled by server setting."
-        return result
-    if not design_template_path or not supplier_template_path:
-        result["note"] = "Bearing prototype skipped: both symbol templates were not uploaded."
-        return result
-    if cv2 is None:
-        result["note"] = "Bearing prototype unavailable: OpenCV is not installed on the server."
-        return result
-
-    design_template = _load_bearing_template(design_template_path)
-    supplier_template = _load_bearing_template(supplier_template_path)
-    if design_template is None or supplier_template is None:
-        result["note"] = "Bearing prototype skipped: uploaded symbol images could not be read."
-        return result
-
-    design_centers, design_plan_bbox, design_storey, design_page_index = _extract_design_plate_centers_for_bearing(design_pdf_path, supplier_full_text or "")
-    supplier_expected = [int(row["plate"]) for row in supplier_rows if row.get("plate") is not None]
-    supplier_centers = _extract_supplier_plate_centers_for_bearing(supplier_pdf_path, supplier_expected)
-
-    result["design_plate_centers"] = len(design_centers)
-    result["supplier_plate_centers"] = len(supplier_centers)
-    result["design_storey"] = design_storey
-
-    if not design_centers or not supplier_centers:
-        result["note"] = "Bearing prototype skipped: plate centers could not be detected reliably."
-        return result
-
-    # Cap workload to keep Render requests responsive.
-    design_centers = dict(list(sorted(design_centers.items()))[:25])
-    supplier_centers = dict(list(sorted(supplier_centers.items()))[:25])
-
-    with fitz.open(design_pdf_path) as ddoc:
-        dpage = ddoc[design_page_index or 0]
-        dgray, dzoom = _render_page_gray(dpage, zoom=0.85)
-    with fitz.open(supplier_pdf_path) as sdoc:
-        spage = sdoc[0]
-        sgray, szoom = _render_page_gray(spage, zoom=0.85)
-        supplier_plan_bbox = _extract_supplier_plan_bbox(spage)
-
-    scaled_design_centers = {k: (v[0] * dzoom, v[1] * dzoom) for k, v in design_centers.items()}
-    scaled_supplier_centers = {k: (v[0] * szoom, v[1] * szoom) for k, v in supplier_centers.items()}
-
-    design_assignments = {}
-    for key, center in scaled_design_centers.items():
-        hit = _find_best_symbol_near_center(dgray, design_template, center, window=220)
-        if hit:
-            design_assignments[key] = hit
-
-    supplier_assignments = {}
-    for key, center in scaled_supplier_centers.items():
-        hit = _find_best_symbol_near_center(sgray, supplier_template, center, window=220)
-        if hit:
-            supplier_assignments[key] = hit
-
-    pairs = _pair_supplier_to_design_regions(supplier_centers, supplier_plan_bbox, design_centers, design_plan_bbox)
-
-    rows = []
-    ok_count = 0
-    check_count = 0
-    for row in supplier_rows:
-        plate_no = int(row["plate"])
-        pair = pairs.get(plate_no, {})
-        design_plate = pair.get("design_plate")
-        design_dir = design_assignments.get(design_plate, {}).get("direction")
-        supplier_dir = supplier_assignments.get(plate_no, {}).get("direction")
-        status = "OK" if (design_dir and supplier_dir and design_dir == supplier_dir) else "CHECK"
-        # Always surface mapped rows so the report shows where detection is missing.
-        if design_plate or design_dir or supplier_dir:
-            rows.append({
-                "plate": plate_no,
-                "design_plate": design_plate or "Not mapped",
-                "design_direction": _direction_label(design_dir),
-                "supplier_direction": _direction_label(supplier_dir),
-                "status": status,
-            })
-            if design_dir and supplier_dir:
-                if status == "OK":
-                    ok_count += 1
-                else:
-                    check_count += 1
-
-    result["enabled"] = True
-    result["rows"] = rows
-    result["compared_count"] = ok_count + check_count
-    result["ok_count"] = ok_count
-    result["check_count"] = check_count
-    if rows:
-        result["note"] = "Prototype compares uploaded bearing symbols near detected plate centers in a lighter server-safe mode."
-    else:
-        result["note"] = "Prototype found plate mapping, but symbol detection did not produce comparable directions." if pairs else "Prototype could not assign bearing symbols to comparable plates."
-    return result
-
-
-def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str="", bearing_result=None):
+def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
     rows = supplier["rows"]
     design_families = list(design.get("families", []))
 
@@ -1759,15 +1328,6 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         ["Mesh reinforcement", design["top_mesh"] or "Not found", supplier["top_mesh_note"] or "Not found", mesh_status],
         ["Fire resistance", design["fire_req"] or "Not found", ", ".join(supplier_fires) if supplier_fires else (supplier["fire_default"] or "Not found"), fire_status],
     ]
-    if bearing_result and bearing_result.get("enabled"):
-        bearing_status = "OK" if bearing_result.get("compared_count", 0) > 0 and bearing_result.get("check_count", 0) == 0 else "CHECK"
-        global_rows.append([
-            "Bearing direction prototype",
-            f"{bearing_result.get('design_plate_centers', 0)} design regions / {bearing_result.get('supplier_plate_centers', 0)} supplier plate centers",
-            f"{bearing_result.get('ok_count', 0)} OK, {bearing_result.get('check_count', 0)} CHECK, compared {bearing_result.get('compared_count', 0)}",
-            bearing_status,
-        ])
-
 
     dwars_ok = []
     for row in rows:
@@ -1992,53 +1552,6 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     story.append(global_tbl)
     story.append(Spacer(1, 10))
 
-
-    if bearing_result and bearing_result.get("enabled") and bearing_result.get("rows"):
-        story.append(PageBreak())
-        story.append(_section_chip("Bearing Direction Comparison"))
-        story.append(Spacer(1, 5))
-        if is_landscape:
-            bearing_col_widths = [18 * mm, 34 * mm, 58 * mm, 58 * mm, 28 * mm]
-        else:
-            bearing_col_widths = [14 * mm, 26 * mm, 46 * mm, 46 * mm, 18 * mm]
-
-        bearing_table_data = [[
-            Paragraph("Plate", styles["TableHead"]),
-            Paragraph("Design plate", styles["TableHead"]),
-            Paragraph("Design bearing", styles["TableHead"]),
-            Paragraph("Supplier bearing", styles["TableHead"]),
-            Paragraph("Status", styles["TableHead"]),
-        ]]
-        for row in bearing_result.get("rows", []):
-            bearing_table_data.append([
-                Paragraph(str(row["plate"]), styles["TableCell"]),
-                Paragraph(str(row["design_plate"]), styles["TableCell"]),
-                Paragraph(str(row["design_direction"]), styles["TableCell"]),
-                Paragraph(str(row["supplier_direction"]), styles["TableCell"]),
-                Paragraph(str(row["status"]), styles["TableCell"]),
-            ])
-
-        bearing_tbl = LongTable(bearing_table_data, colWidths=bearing_col_widths, repeatRows=1)
-        bearing_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), PREMIUM_NAVY),
-            ("LINEBELOW", (0, 0), (-1, 0), 0.8, PREMIUM_GOLD),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("BOX", (0, 0), (-1, -1), 0.55, PREMIUM_BORDER),
-            ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PREMIUM_ROW]),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 5.5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
-        ]))
-        for i, r in enumerate(bearing_result.get("rows", []), start=1):
-            color = "#166B45" if r.get("status") == "OK" else "#A05A00"
-            bearing_tbl.setStyle(TableStyle([("TEXTCOLOR", (-1, i), (-1, i), HexColor(color)), ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold")]))
-        story.append(bearing_tbl)
-        story.append(Spacer(1, 6))
-        story.append(Paragraph(html.escape(bearing_result.get("note", "")), styles["SmallX"]))
-
     story.append(_section_chip("Engineering Conclusion"))
     story.append(Spacer(1, 5))
     for line in conclusion_lines:
@@ -2073,8 +1586,6 @@ def generate():
     design_file = request.files.get("design_pdf")
     supplier_file = request.files.get("supplier_pdf")
     logo_file = request.files.get("company_logo")
-    design_bearing_file = request.files.get("design_bearing_symbol")
-    supplier_bearing_file = request.files.get("supplier_bearing_symbol")
     project_title = (request.form.get("project_title") or "").strip()
     client_local_date = (request.form.get("client_local_date") or "").strip()
     client_time_zone = (request.form.get("client_time_zone") or "").strip()
@@ -2092,15 +1603,6 @@ def generate():
     if logo_file and getattr(logo_file, "filename", "") and not is_allowed_logo_filename(logo_file.filename):
         return "Logo must be a PNG or JPG image.", 400
 
-    design_bearing_name = getattr(design_bearing_file, "filename", "") or ""
-    supplier_bearing_name = getattr(supplier_bearing_file, "filename", "") or ""
-    if bool(design_bearing_name) ^ bool(supplier_bearing_name):
-        return "Upload both bearing symbol images or leave both empty.", 400
-    if design_bearing_name and not is_allowed_logo_filename(design_bearing_name):
-        return "Design bearing symbol must be PNG or JPG.", 400
-    if supplier_bearing_name and not is_allowed_logo_filename(supplier_bearing_name):
-        return "Supplier bearing symbol must be PNG or JPG.", 400
-
     _ = client_time_zone  # reserved for future timezone-aware report metadata
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -2114,18 +1616,6 @@ def generate():
             ext = os.path.splitext(logo_file.filename)[1].lower()
             logo_path = os.path.join(temp_dir, f"company_logo{ext}")
             logo_file.save(logo_path)
-
-        design_bearing_path = None
-        if design_bearing_name:
-            ext = os.path.splitext(design_bearing_name)[1].lower()
-            design_bearing_path = os.path.join(temp_dir, f"design_bearing_symbol{ext}")
-            design_bearing_file.save(design_bearing_path)
-
-        supplier_bearing_path = None
-        if supplier_bearing_name:
-            ext = os.path.splitext(supplier_bearing_name)[1].lower()
-            supplier_bearing_path = os.path.join(temp_dir, f"supplier_bearing_symbol{ext}")
-            supplier_bearing_file.save(supplier_bearing_path)
 
         try:
             supplier = extract_supplier_data(supplier_path)
@@ -2144,29 +1634,6 @@ def generate():
                 "Try a cleaner PDF export or update the parser for this supplier layout."
             ), 400
 
-        try:
-            bearing_result = extract_bearing_direction_prototype(
-                design_path,
-                supplier_path,
-                supplier.get("rows", []),
-                supplier_full_text=supplier.get("full_text", ""),
-                design_template_path=design_bearing_path,
-                supplier_template_path=supplier_bearing_path,
-            )
-        except Exception:
-            app.logger.exception("Bearing prototype failed")
-            bearing_result = {
-                "enabled": False,
-                "note": "Bearing prototype failed during processing. Report generated without bearing comparison.",
-                "rows": [],
-                "design_storey": None,
-                "compared_count": 0,
-                "ok_count": 0,
-                "check_count": 0,
-                "design_plate_centers": 0,
-                "supplier_plate_centers": 0,
-            }
-
         pdf_buffer = build_report_pdf_bytes(
             design,
             supplier,
@@ -2174,7 +1641,6 @@ def generate():
             logo_path=logo_path,
             report_orientation=report_orientation,
             report_date_str=_safe_report_date(client_local_date),
-            bearing_result=bearing_result,
         )
         return send_file(
             pdf_buffer,
