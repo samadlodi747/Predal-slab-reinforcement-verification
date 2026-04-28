@@ -8,6 +8,7 @@ import tempfile
 from statistics import mean
 
 import fitz
+import numpy as np
 from flask import Flask, render_template_string, request, send_file
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
@@ -771,6 +772,7 @@ def extract_design_data(pdf_path, supplier_full_text=None):
         "available_storeys": sorted(storey_regions.keys()),
         "local_text": local_text,
         "total_thickness_mm": total_thickness_mm,
+        "source_pdf_path": pdf_path,
     }
 
 
@@ -1470,9 +1472,198 @@ def extract_supplier_data(pdf_path):
 
     data["full_text"] = full_text
     data["detected_supplier_format"] = supplier_format
+    data["source_pdf_path"] = pdf_path
     return data
 
 
+def _storey_label_token(storey_hint):
+    if not storey_hint or not str(storey_hint).startswith("LEVEL_"):
+        return None
+    try:
+        lvl = int(str(storey_hint).split("_", 1)[1])
+    except Exception:
+        return None
+    return f"/B{lvl}."
+
+
+def _iter_predal_labels_from_block_text(text, storey_hint=None):
+    txt = str(text or "")
+    if not re.search(r':\s*\d+\s*x\s*\d+\b', txt, re.I):
+        return []
+    if re.search(r':\s*\d+\s*x\s*\d+\s*x\s*\d+', txt, re.I):
+        return []
+    token = _storey_label_token(storey_hint)
+    labels = []
+    for m in re.finditer(r'\b([A-Z]/B-?\d+\.\d+[A-Z]?)\b', txt, re.I):
+        label = m.group(1).upper()
+        if token and token not in label:
+            continue
+        labels.append(label)
+    return labels
+
+
+def _extract_predal_label_positions(pdf_path, storey_hint=None):
+    positions = {}
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                block_fallback = {}
+                for block in page.get_text("blocks", sort=False):
+                    block_labels = _iter_predal_labels_from_block_text(block[4], storey_hint=storey_hint)
+                    if not block_labels:
+                        continue
+                    entry = {
+                        "bbox": (block[0], block[1], block[2], block[3]),
+                        "center": ((block[0] + block[2]) / 2.0, (block[1] + block[3]) / 2.0),
+                        "page": page.number,
+                    }
+                    for label in block_labels:
+                        block_fallback[label] = entry
+
+                for label, fallback in block_fallback.items():
+                    rects = page.search_for(label)
+                    if rects:
+                        rect = rects[0]
+                        positions[label] = {
+                            "bbox": (rect.x0, rect.y0, rect.x1, rect.y1),
+                            "center": ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0),
+                            "page": page.number,
+                        }
+                    else:
+                        positions[label] = fallback
+    except Exception:
+        return {}
+    return positions
+
+
+def _extract_design_label_family_map(pdf_path, storey_hint=None):
+    label_positions = _extract_predal_label_positions(pdf_path, storey_hint=storey_hint)
+    families = []
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                for block in page.get_text("blocks", sort=False):
+                    parsed = _parse_design_families_from_text(clean_spaces(block[4]))
+                    if not parsed:
+                        continue
+                    x0, y0, x1, y1 = block[:4]
+                    center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                    for fam in parsed:
+                        families.append({"family": tuple(fam), "center": center, "page": page.number})
+    except Exception:
+        return {}, label_positions
+
+    label_family_map = {}
+    for label, entry in label_positions.items():
+        same_page = [f for f in families if f["page"] == entry["page"]] or families
+        if not same_page:
+            continue
+        nearest = min(
+            same_page,
+            key=lambda item: math.hypot(
+                entry["center"][0] - item["center"][0],
+                entry["center"][1] - item["center"][1],
+            ),
+        )
+        label_family_map[label] = nearest["family"]
+    return label_family_map, label_positions
+
+
+def _extract_supplier_plan_plate_positions(pdf_path):
+    positions = {}
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                page_text = page.get_text("text", sort=False)
+                plate_numbers = sorted(set(int(n) for n in re.findall(r'\.(\d{1,3})\.G\b', page_text)))
+                for plate in plate_numbers:
+                    rects = page.search_for(f".{plate}.G")
+                    if rects:
+                        rect = rects[0]
+                        positions[plate] = {
+                            "bbox": (rect.x0, rect.y0, rect.x1, rect.y1),
+                            "center": ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0),
+                            "page": page.number,
+                        }
+                        continue
+                    for block in page.get_text("blocks", sort=False):
+                        if re.search(rf'\.{plate}\.G\b', str(block[4] or "")):
+                            positions[plate] = {
+                                "bbox": (block[0], block[1], block[2], block[3]),
+                                "center": ((block[0] + block[2]) / 2.0, (block[1] + block[3]) / 2.0),
+                                "page": page.number,
+                            }
+                            break
+    except Exception:
+        return {}
+    return positions
+
+
+def _fit_affine_transform(source_points, target_points):
+    if len(source_points) < 3 or len(target_points) < 3 or len(source_points) != len(target_points):
+        return None
+
+    try:
+        rows = []
+        values = []
+        for (sx, sy), (tx, ty) in zip(source_points, target_points):
+            rows.append([sx, sy, 1.0, 0.0, 0.0, 0.0])
+            rows.append([0.0, 0.0, 0.0, sx, sy, 1.0])
+            values.append(tx)
+            values.append(ty)
+        matrix = np.array(rows, dtype=float)
+        vector = np.array(values, dtype=float)
+        params, _, _, _ = np.linalg.lstsq(matrix, vector, rcond=None)
+        return tuple(float(v) for v in params.tolist())
+    except Exception:
+        return None
+
+
+def _apply_affine_transform(point, params):
+    if not params:
+        return point
+    x, y = point
+    a, b, c, d, e, f = params
+    return (a * x + b * y + c, d * x + e * y + f)
+
+
+def _build_plan_registered_plate_family_map(design, supplier):
+    design_pdf = design.get("source_pdf_path")
+    supplier_pdf = supplier.get("source_pdf_path")
+    storey_hint = design.get("storey_hint")
+
+    if not design_pdf or not supplier_pdf:
+        return {}
+
+    design_label_family_map, design_label_positions = _extract_design_label_family_map(design_pdf, storey_hint=storey_hint)
+    supplier_label_positions = _extract_predal_label_positions(supplier_pdf, storey_hint=storey_hint)
+    supplier_plate_positions = _extract_supplier_plan_plate_positions(supplier_pdf)
+
+    common_labels = sorted(set(design_label_positions.keys()) & set(supplier_label_positions.keys()))
+    if len(common_labels) < 4 or not supplier_plate_positions:
+        return {}
+
+    source_points = [supplier_label_positions[label]["center"] for label in common_labels]
+    target_points = [design_label_positions[label]["center"] for label in common_labels]
+    affine = _fit_affine_transform(source_points, target_points)
+    if not affine:
+        return {}
+
+    plate_family_map = {}
+    for plate, entry in supplier_plate_positions.items():
+        transformed = _apply_affine_transform(entry["center"], affine)
+        nearest_label = min(
+            design_label_positions.items(),
+            key=lambda item: math.hypot(
+                transformed[0] - item[1]["center"][0],
+                transformed[1] - item[1]["center"][1],
+            ),
+        )[0]
+        family = design_label_family_map.get(nearest_label)
+        if family:
+            plate_family_map[int(plate)] = family
+
+    return plate_family_map
 
 
 def _select_design_family_for_supplier_row_display(row, design_families, rounding_tol=0.10):
@@ -1598,7 +1789,9 @@ def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.1
 def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
     rows = supplier["rows"]
     design_families = list(design.get("families", []))
-    plate_family_map = _cluster_design_families_for_plate_display(rows, design_families)
+    plate_family_map = _build_plan_registered_plate_family_map(design, supplier)
+    if not plate_family_map:
+        plate_family_map = _cluster_design_families_for_plate_display(rows, design_families)
 
     comparison_rows = []
     matched_ok = 0
