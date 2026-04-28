@@ -1627,6 +1627,195 @@ def _apply_affine_transform(point, params):
     return (a * x + b * y + c, d * x + e * y + f)
 
 
+def _iter_page_line_segments(drawings):
+    for drawing in drawings or []:
+        for item in drawing.get("items", []):
+            if not item:
+                continue
+            op = item[0]
+            if op == "l":
+                p1, p2 = item[1], item[2]
+                yield (float(p1.x), float(p1.y), float(p2.x), float(p2.y))
+            elif op == "re":
+                rect = item[1]
+                yield (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y0))
+                yield (float(rect.x1), float(rect.y0), float(rect.x1), float(rect.y1))
+                yield (float(rect.x1), float(rect.y1), float(rect.x0), float(rect.y1))
+                yield (float(rect.x0), float(rect.y1), float(rect.x0), float(rect.y0))
+
+
+def _point_inside_bbox(point, bbox, margin=2.0):
+    x, y = point
+    x0, y0, x1, y1 = bbox
+    return (x0 - margin) <= x <= (x1 + margin) and (y0 - margin) <= y <= (y1 + margin)
+
+
+def _detect_family_anchor_from_drawings(bbox, drawings):
+    best = None
+    x0, y0, x1, y1 = bbox
+    search_rect = fitz.Rect(x0 - 6, y0 - 6, x1 + 6, y1 + 6)
+
+    for seg in _iter_page_line_segments(drawings):
+        sx0, sy0, sx1, sy1 = seg
+        seg_rect = fitz.Rect(min(sx0, sx1), min(sy0, sy1), max(sx0, sx1), max(sy0, sy1))
+        if not seg_rect.intersects(search_rect):
+            continue
+
+        p1 = (sx0, sy0)
+        p2 = (sx1, sy1)
+        inside1 = _point_inside_bbox(p1, bbox)
+        inside2 = _point_inside_bbox(p2, bbox)
+        if inside1 == inside2:
+            continue
+
+        outside = p2 if inside1 else p1
+        dist = math.hypot(sx1 - sx0, sy1 - sy0)
+        if best is None or dist > best[0]:
+            best = (dist, outside)
+
+    return best[1] if best else None
+
+
+def _extract_design_family_points(pdf_path, storey_hint=None):
+    points = []
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                drawings = page.get_drawings()
+                for block in page.get_text("blocks", sort=False):
+                    parsed = _parse_design_families_from_text(clean_spaces(block[4]))
+                    if not parsed:
+                        continue
+                    bbox = (float(block[0]), float(block[1]), float(block[2]), float(block[3]))
+                    center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+                    anchor = _detect_family_anchor_from_drawings(bbox, drawings)
+                    point = anchor or center
+                    for fam in parsed:
+                        points.append(
+                            {
+                                "family": tuple(fam),
+                                "point": point,
+                                "center": center,
+                                "bbox": bbox,
+                                "page": page.number,
+                            }
+                        )
+    except Exception:
+        return []
+    return points
+
+
+def _nearest_design_family_point(point, family_points, page=None):
+    if not family_points:
+        return None
+    candidates = [fp for fp in family_points if page is None or fp.get("page") == page] or list(family_points)
+    return min(
+        candidates,
+        key=lambda item: math.hypot(point[0] - item["point"][0], point[1] - item["point"][1]),
+    )
+
+
+def _design_family_key(fam):
+    if not fam:
+        return None
+    return (
+        round(float(fam[0]), 2),
+        round(float(fam[1]), 2),
+        int(fam[2]) if fam[2] is not None else None,
+        int(fam[3]) if fam[3] is not None else None,
+    )
+
+
+def _supplier_exact_family_key(row, design_family_keys):
+    if not row:
+        return None
+    fam = (
+        round(float(row.get("langs_cm2m") or 0.0), 2),
+        round(float(row.get("dwars_cm2m") or 0.0), 2),
+        None,
+        None,
+    )
+    return fam if fam in design_family_keys else None
+
+
+def _build_supplier_family_components(transformed_positions, supplier_rows_by_plate, design_family_keys, max_dist=320.0):
+    adjacency = {}
+    supplier_family_by_plate = {}
+
+    for plate, point in transformed_positions.items():
+        row = supplier_rows_by_plate.get(int(plate))
+        sfam = _supplier_exact_family_key(row, design_family_keys)
+        supplier_family_by_plate[int(plate)] = sfam
+        adjacency[int(plate)] = set()
+
+    plates = sorted(transformed_positions)
+    for i, plate_a in enumerate(plates):
+        fam_a = supplier_family_by_plate.get(int(plate_a))
+        if not fam_a:
+            continue
+        pa = transformed_positions[plate_a]
+        for plate_b in plates[i + 1:]:
+            fam_b = supplier_family_by_plate.get(int(plate_b))
+            if fam_b != fam_a:
+                continue
+            pb = transformed_positions[plate_b]
+            if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= max_dist:
+                adjacency[int(plate_a)].add(int(plate_b))
+                adjacency[int(plate_b)].add(int(plate_a))
+
+    components = []
+    seen = set()
+    for plate in sorted(adjacency):
+        if plate in seen:
+            continue
+        stack = [plate]
+        comp = []
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            comp.append(cur)
+            stack.extend(sorted(adjacency.get(cur, ())))
+        components.append(sorted(comp))
+
+    return components, supplier_family_by_plate
+
+
+def _smooth_registered_plate_families(initial_map, transformed_positions, supplier_rows_by_plate, design_families):
+    design_family_keys = {_design_family_key(fam) for fam in design_families or []}
+    components, supplier_family_by_plate = _build_supplier_family_components(
+        transformed_positions,
+        supplier_rows_by_plate,
+        design_family_keys,
+    )
+
+    smoothed = dict(initial_map)
+
+    for comp in components:
+        if len(comp) < 3:
+            continue
+        supplier_family = supplier_family_by_plate.get(comp[0])
+        if not supplier_family:
+            continue
+
+        init_families = [_design_family_key(smoothed.get(plate)) for plate in comp if smoothed.get(plate)]
+        if not init_families:
+            continue
+
+        distinct_init = {fam for fam in init_families if fam is not None}
+        supplier_hits = sum(1 for fam in init_families if fam == supplier_family)
+
+        # Only use supplier-consensus smoothing when the registered design mapping is split
+        # AND at least one plate in the contiguous group already lands on that same family.
+        # This preserves earlier edited-file fixes where isolated changed plates should not
+        # redefine the design family display.
+        if len(distinct_init) >= 2 and supplier_hits >= 1:
+            for plate in comp:
+                smoothed[int(plate)] = supplier_family
+
+    return smoothed
+
 def _build_plan_registered_plate_family_map(design, supplier):
     design_pdf = design.get("source_pdf_path")
     supplier_pdf = supplier.get("source_pdf_path")
@@ -1635,12 +1824,13 @@ def _build_plan_registered_plate_family_map(design, supplier):
     if not design_pdf or not supplier_pdf:
         return {}
 
-    design_label_family_map, design_label_positions = _extract_design_label_family_map(design_pdf, storey_hint=storey_hint)
+    design_family_points = _extract_design_family_points(design_pdf, storey_hint=storey_hint)
+    design_label_positions = _extract_predal_label_positions(design_pdf, storey_hint=storey_hint)
     supplier_label_positions = _extract_predal_label_positions(supplier_pdf, storey_hint=storey_hint)
     supplier_plate_positions = _extract_supplier_plan_plate_positions(supplier_pdf)
 
     common_labels = sorted(set(design_label_positions.keys()) & set(supplier_label_positions.keys()))
-    if len(common_labels) < 4 or not supplier_plate_positions:
+    if len(common_labels) < 4 or not supplier_plate_positions or not design_family_points:
         return {}
 
     source_points = [supplier_label_positions[label]["center"] for label in common_labels]
@@ -1649,21 +1839,24 @@ def _build_plan_registered_plate_family_map(design, supplier):
     if not affine:
         return {}
 
-    plate_family_map = {}
-    for plate, entry in supplier_plate_positions.items():
-        transformed = _apply_affine_transform(entry["center"], affine)
-        nearest_label = min(
-            design_label_positions.items(),
-            key=lambda item: math.hypot(
-                transformed[0] - item[1]["center"][0],
-                transformed[1] - item[1]["center"][1],
-            ),
-        )[0]
-        family = design_label_family_map.get(nearest_label)
-        if family:
-            plate_family_map[int(plate)] = family
+    transformed_positions = {
+        int(plate): _apply_affine_transform(entry["center"], affine)
+        for plate, entry in supplier_plate_positions.items()
+    }
 
-    return plate_family_map
+    plate_family_map = {}
+    for plate, transformed in transformed_positions.items():
+        nearest = _nearest_design_family_point(transformed, design_family_points)
+        if nearest:
+            plate_family_map[int(plate)] = nearest["family"]
+
+    supplier_rows_by_plate = {int(row.get("plate") or 0): row for row in supplier.get("rows", [])}
+    return _smooth_registered_plate_families(
+        plate_family_map,
+        transformed_positions,
+        supplier_rows_by_plate,
+        design.get("families") or [],
+    )
 
 
 def _select_design_family_for_supplier_row_display(row, design_families, rounding_tol=0.10):
