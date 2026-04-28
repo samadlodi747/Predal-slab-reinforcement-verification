@@ -776,7 +776,7 @@ def extract_design_data(pdf_path, supplier_full_text=None):
 
 def detect_supplier_format(full_text):
     txt = (full_text or "").lower()
-    if "overzichtstabel breedvloerplaten" in txt or "van thuyne" in txt or "breedvloerplaten met benor-merk" in txt:
+    if (("overzichtstabel" in txt and "breedvloerplaten" in txt) or "van thuyne" in txt or "van thuyne-ide" in txt or "breedvloerplaten met benor-merk" in txt):
         return "van_thuyne_table"
     if "oeterbeton" in txt or "o e t e r" in txt:
         return "oeterbeton_drawing"
@@ -882,9 +882,250 @@ def _split_nonempty_lines(value):
     return [ln.strip() for ln in str(value or "").splitlines() if ln and ln.strip()]
 
 
+
+
+def _word_center_x(word):
+    return (float(word[0]) + float(word[2])) / 2.0
+
+
+def _word_center_y(word):
+    return (float(word[1]) + float(word[3])) / 2.0
+
+
+def _build_plate_column_bounds(plate_columns):
+    bounds = []
+    xs = [x for _, x in plate_columns]
+    if len(xs) == 1:
+        x = xs[0]
+        return [(plate_columns[0][0], x - 10.0, x + 10.0)]
+
+    for i, (plate, x) in enumerate(plate_columns):
+        if i == 0:
+            half = abs(xs[i] - xs[i + 1]) / 2.0
+            left = x - half
+            right = (x + xs[i + 1]) / 2.0
+        elif i == len(xs) - 1:
+            half = abs(xs[i - 1] - xs[i]) / 2.0
+            left = (xs[i - 1] + x) / 2.0
+            right = x + half
+        else:
+            left = (xs[i - 1] + x) / 2.0
+            right = (x + xs[i + 1]) / 2.0
+        bounds.append((plate, min(left, right), max(left, right)))
+    return bounds
+
+
+def _assign_words_to_plate_columns(words, bounds):
+    by_plate = {}
+    for plate, _, _ in bounds:
+        by_plate[plate] = []
+
+    for word in words:
+        x = _word_center_x(word)
+        assigned_plate = None
+        nearest_plate = None
+        nearest_dist = None
+
+        for plate, x0, x1 in bounds:
+            if x0 <= x <= x1:
+                assigned_plate = plate
+                break
+            center = (x0 + x1) / 2.0
+            dist = abs(x - center)
+            if nearest_dist is None or dist < nearest_dist:
+                nearest_dist = dist
+                nearest_plate = plate
+
+        if assigned_plate is None:
+            assigned_plate = nearest_plate
+
+        if assigned_plate is not None:
+            by_plate.setdefault(assigned_plate, []).append(word)
+
+    return by_plate
+
+
+def _extract_van_thuyne_rows_from_words(page, full_text, meta):
+    words = page.get_text("words", sort=False)
+    if not words:
+        return []
+
+    overview_candidates = sorted(
+        [
+            w for w in words
+            if str(w[4]).strip().lower().startswith("overzichtstabel")
+        ],
+        key=lambda w: (_word_center_y(w), _word_center_x(w)),
+    )
+
+    def _try_anchor(overview_anchor):
+        overview_x = _word_center_x(overview_anchor)
+        overview_y = _word_center_y(overview_anchor)
+
+        breed_matches = [
+            w for w in words
+            if str(w[4]).strip().lower().startswith("breedvloerplaten")
+            and abs(_word_center_x(w) - overview_x) <= 140
+            and 0 <= (_word_center_y(w) - overview_y) <= 120
+        ]
+        if not breed_matches:
+            return []
+
+        nr_candidates = [
+            w for w in words
+            if str(w[4]).strip().lower().startswith("nr")
+            and abs(_word_center_y(w) - overview_y) <= 40
+            and _word_center_x(w) < overview_x
+            and _word_center_x(w) > overview_x - 160
+        ]
+        if not nr_candidates:
+            return []
+
+        nr_anchor = min(
+            nr_candidates,
+            key=lambda w: (
+                abs(_word_center_y(w) - overview_y),
+                abs(_word_center_x(w) - overview_x),
+            ),
+        )
+
+        header_x_min = max(0.0, min(overview_x, _word_center_x(nr_anchor)) - 420.0)
+        header_plate_words = [
+            w for w in words
+            if re.fullmatch(r"\d+", str(w[4]).strip())
+            and abs(_word_center_y(w) - _word_center_y(nr_anchor)) <= 15
+            and header_x_min <= _word_center_x(w) < _word_center_x(nr_anchor) - 5
+        ]
+        if not header_plate_words:
+            return []
+
+        plate_columns = {}
+        for word in header_plate_words:
+            plate_no = _int_from_text(word[4])
+            if plate_no is None or plate_no <= 0:
+                continue
+            cx = _word_center_x(word)
+            prev = plate_columns.get(plate_no)
+            if prev is None or cx > prev:
+                plate_columns[plate_no] = cx
+
+        if len(plate_columns) < 5:
+            return []
+
+        ordered_columns = sorted(plate_columns.items(), key=lambda item: item[0])
+        bounds = _build_plate_column_bounds(ordered_columns)
+        min_x = min(x for _, x in ordered_columns)
+        max_x = max(x for _, x in ordered_columns)
+
+        label_tokens = [
+            ("predal_cm", "Predal"),
+            ("opstort_cm", "Opstort"),
+            ("total_cm", "Totale"),
+            ("finish", "Afwer-"),
+            ("length_cm", "Lengte"),
+            ("width_cm", "Breedte"),
+            ("fire_min", "Rf"),
+            ("langs_mm2m", "Hoofd-"),
+            ("dwars_mm2m", "Dwars"),
+            ("tralie_h", "Tralie-"),
+            ("weight_kg", "Gewicht"),
+        ]
+
+        label_x_min = _word_center_x(nr_anchor) - 40.0
+        label_x_max = max(overview_x, _word_center_x(nr_anchor)) + 25.0
+        label_y = {}
+
+        for key, token in label_tokens:
+            matches = [
+                w for w in words
+                if str(w[4]).strip() == token
+                and label_x_min <= _word_center_x(w) <= label_x_max
+                and _word_center_y(w) >= overview_y - 10
+                and _word_center_y(w) <= overview_y + 420
+            ]
+            if not matches:
+                return []
+            label_y[key] = min(_word_center_y(w) for w in matches)
+
+        ordered_labels = [key for key, _ in label_tokens]
+        y_values = [label_y[key] for key in ordered_labels]
+        bands = {}
+        for idx, key in enumerate(ordered_labels):
+            lower = (y_values[idx - 1] + y_values[idx]) / 2.0 if idx > 0 else y_values[idx] - 20.0
+            upper = (y_values[idx] + y_values[idx + 1]) / 2.0 if idx < len(y_values) - 1 else y_values[idx] + 25.0
+            bands[key] = (lower, upper)
+
+        row_tokens = {}
+        for key, (y0, y1) in bands.items():
+            selected = [
+                w for w in words
+                if y0 <= _word_center_y(w) <= y1
+                and (min_x - 15.0) <= _word_center_x(w) <= (max_x + 15.0)
+            ]
+            row_tokens[key] = _assign_words_to_plate_columns(selected, bounds)
+
+        rows = []
+        env_value = "EE2" if re.search(r"Omgevingsklasse\s*EE2", full_text or "", re.I) else None
+
+        for plate, _x in ordered_columns:
+            def _cell_text(row_key):
+                items = row_tokens.get(row_key, {}).get(plate, [])
+                if not items:
+                    return ""
+                items = sorted(items, key=lambda w: (_word_center_y(w), _word_center_x(w)))
+                return " ".join(str(w[4]).strip() for w in items if str(w[4]).strip())
+
+            predal_cm = _int_from_text(_cell_text("predal_cm"))
+            total_cm = _int_from_text(_cell_text("total_cm"))
+            length_cm = _int_from_text(_cell_text("length_cm"))
+            width_cm = _int_from_text(_cell_text("width_cm"))
+            fire_min = _int_from_text(_cell_text("fire_min"))
+            langs_mm2m = _int_from_text(_cell_text("langs_mm2m"))
+            dwars_mm2m = _int_from_text(_cell_text("dwars_mm2m"))
+            tralie_h = _int_from_text(_cell_text("tralie_h"))
+            weight_kg = _int_from_text(_cell_text("weight_kg"))
+            finish = clean_spaces(_cell_text("finish")) or None
+
+            if None in (predal_cm, total_cm, length_cm, width_cm, langs_mm2m, dwars_mm2m):
+                continue
+
+            row = {
+                "plate": plate,
+                "article": None,
+                "tralie_h": tralie_h,
+                "floor_thk": total_cm * 10,
+                "length": length_cm * 10,
+                "predal_thk": predal_cm * 10,
+                "width": width_cm * 10,
+                "langs_mm2m": langs_mm2m,
+                "dwars_mm2m": dwars_mm2m,
+                "weight_kg": weight_kg,
+                "type": finish,
+                "uw1": None,
+                "uw2": None,
+                "cover": None,
+                "fire": (f"R{fire_min}" if fire_min is not None else meta.get("fire_default")),
+                "env": env_value,
+                "concrete": meta.get("concrete"),
+                "supplier_format": "Van Thuyne word-grid parser",
+            }
+            rows.append(finalize_row(row))
+
+        rows.sort(key=lambda x: x["plate"])
+        return rows if len(rows) >= 5 else []
+
+    for overview_anchor in overview_candidates:
+        rows = _try_anchor(overview_anchor)
+        if rows:
+            return rows
+
+    return []
+
+
 def parse_van_thuyne_table(pdf_path, full_text):
     meta = parse_common_supplier_meta(full_text)
     rows = []
+    parser_label = "Van Thuyne overview table parser"
 
     try:
         with fitz.open(pdf_path) as doc:
@@ -954,15 +1195,24 @@ def parse_van_thuyne_table(pdf_path, full_text):
                             "fire": (f"R{fire_min}" if fire_min is not None else meta.get("fire_default")),
                             "env": "EE2" if re.search(r"Omgevingsklasse\s*EE2", full_text or "", re.I) else None,
                             "concrete": meta.get("concrete"),
-                            "supplier_format": "Van Thuyne overview table parser",
+                            "supplier_format": parser_label,
                         }
                         rows.append(finalize_row(row))
+
+                if rows:
+                    break
+
+                fallback_rows = _extract_van_thuyne_rows_from_words(page, full_text, meta)
+                if fallback_rows:
+                    rows = fallback_rows
+                    parser_label = "Van Thuyne word-grid parser"
+                    break
     except Exception:
         rows = []
 
     rows.sort(key=lambda x: x["plate"])
     meta["rows"] = rows
-    meta["supplier_format"] = "Van Thuyne overview table parser"
+    meta["supplier_format"] = parser_label
     return meta
 
 
@@ -1225,6 +1475,34 @@ def extract_supplier_data(pdf_path):
 
 
 
+def _select_design_family_for_supplier_row_display(row, design_families, rounding_tol=0.10):
+    supplier_hw = float(row.get("langs_cm2m") or 0.0)
+    supplier_dw = float(row.get("dwars_cm2m") or 0.0)
+    candidates = []
+
+    for fam in design_families or []:
+        hw, dw, vw_d, vw_l = fam
+        if supplier_hw + rounding_tol >= hw:
+            hw_surplus = max(0.0, supplier_hw - hw)
+            dw_delta = abs(supplier_dw - dw)
+            candidates.append((hw_surplus, dw_delta, -hw, -dw, fam))
+
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        return candidates[0][4]
+
+    fallback = []
+    for fam in design_families or []:
+        hw, dw, vw_d, vw_l = fam
+        fallback.append((abs(supplier_hw - hw), abs(supplier_dw - dw), -hw, -dw, fam))
+
+    if not fallback:
+        return None
+
+    fallback.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return fallback[0][4]
+
+
 def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.10):
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
     supplier_dw = float(row.get("dwars_cm2m") or 0.0)
@@ -1250,17 +1528,19 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     comparison_rows = []
     matched_ok = 0
     for row in rows:
+        display_family = _select_design_family_for_supplier_row_display(row, design_families)
         matched_family = _match_design_family_for_supplier_row(row, design_families)
         is_match = matched_family is not None
         row["status"] = "OK" if is_match else "CHECK"
         row["matched_design_family"] = matched_family
+        row["display_design_family"] = display_family
         if is_match:
             matched_ok += 1
 
-        if matched_family:
-            design_note = f"HW {matched_family[0]:.2f} / DW {matched_family[1]:.2f}"
+        if display_family:
+            design_note = f"HW {display_family[0]:.2f} / DW {display_family[1]:.2f}"
         else:
-            design_note = "No readable family match on selected design storey"
+            design_note = "No readable family found on selected design storey"
 
         comparison_rows.append(
             [
