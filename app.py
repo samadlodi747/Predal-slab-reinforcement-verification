@@ -1503,6 +1503,80 @@ def _select_design_family_for_supplier_row_display(row, design_families, roundin
     return fallback[0][4]
 
 
+def _supplier_satisfies_design_family(row, family, rounding_tol=0.10):
+    if not family:
+        return False
+    supplier_hw = float(row.get("langs_cm2m") or 0.0)
+    supplier_dw = float(row.get("dwars_cm2m") or 0.0)
+    hw, dw, vw_d, vw_l = family
+    return supplier_hw + rounding_tol >= hw and supplier_dw + rounding_tol >= dw
+
+
+def _group_supplier_rows_by_length_sequence(rows, split_jump_mm=1500):
+    if not rows:
+        return []
+    ordered = sorted(rows, key=lambda r: int(r.get("plate") or 0))
+    groups = [[ordered[0]]]
+    for row in ordered[1:]:
+        prev = groups[-1][-1]
+        prev_len = int(prev.get("length") or 0)
+        cur_len = int(row.get("length") or 0)
+        if prev_len and cur_len and abs(cur_len - prev_len) > split_jump_mm:
+            groups.append([row])
+        else:
+            groups[-1].append(row)
+    return groups
+
+
+def _cluster_design_families_for_plate_display(rows, design_families):
+    families = sorted({tuple(f) for f in (design_families or [])}, key=lambda f: (float(f[0]), float(f[1])))
+    if len(families) < 3 or len(rows or []) < 6:
+        return {}
+
+    groups = _group_supplier_rows_by_length_sequence(rows)
+    if not groups:
+        return {}
+
+    lowest = families[0]
+    highest = families[-1]
+    remaining = families[1:-1]
+
+    assignments = {}
+
+    # 1) Special pass-plate cluster: same / similar long length with one narrow strip + one normal width plate.
+    for group in groups:
+        widths = [int(r.get("width") or 0) for r in group]
+        lengths = [int(r.get("length") or 0) for r in group]
+        if not widths or not lengths:
+            continue
+        if max(lengths) >= 5000 and min(widths) <= 800 and max(widths) >= 1800 and len(group) >= 2:
+            for row in group:
+                assignments[int(row["plate"])] = highest
+            break
+
+    # 2) Remaining groups by geometry-only length band.
+    remaining_groups = [g for g in groups if int(g[0]["plate"]) not in assignments]
+    long_families = [f for f in remaining if float(f[0]) > float(lowest[0])]
+    mid_family = long_families[0] if long_families else (remaining[0] if remaining else highest)
+    high_family = long_families[-1] if long_families else highest
+
+    for group in remaining_groups:
+        lengths = [int(r.get("length") or 0) for r in group if r.get("length")]
+        if not lengths:
+            continue
+        mean_len = sum(lengths) / float(len(lengths))
+        if mean_len < 3000:
+            fam = lowest
+        elif mean_len < 5000:
+            fam = mid_family
+        else:
+            fam = high_family
+        for row in group:
+            assignments[int(row["plate"])] = fam
+
+    return assignments
+
+
 def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.10):
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
     supplier_dw = float(row.get("dwars_cm2m") or 0.0)
@@ -1524,16 +1598,24 @@ def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.1
 def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
     rows = supplier["rows"]
     design_families = list(design.get("families", []))
+    plate_family_map = _cluster_design_families_for_plate_display(rows, design_families)
 
     comparison_rows = []
     matched_ok = 0
     for row in rows:
-        display_family = _select_design_family_for_supplier_row_display(row, design_families)
-        matched_family = _match_design_family_for_supplier_row(row, design_families)
-        is_match = matched_family is not None
+        plate_no = int(row.get("plate") or 0)
+        mapped_family = plate_family_map.get(plate_no)
+        display_family = mapped_family or _select_design_family_for_supplier_row_display(row, design_families)
+        matched_family = mapped_family if mapped_family and _supplier_satisfies_design_family(row, mapped_family) else _match_design_family_for_supplier_row(row, design_families)
+        is_match = False
+        if mapped_family:
+            is_match = _supplier_satisfies_design_family(row, mapped_family)
+        else:
+            is_match = matched_family is not None
         row["status"] = "OK" if is_match else "CHECK"
         row["matched_design_family"] = matched_family
         row["display_design_family"] = display_family
+        row["mapped_design_family"] = mapped_family
         if is_match:
             matched_ok += 1
 
