@@ -473,13 +473,17 @@ def normalize_storey_key(text):
         return "FOUNDATION"
 
     explicit_patterns = [
-        (r"\b(?:AFDEK\.?\s*)?GELIJKVLOERS\b", "LEVEL_0"),
-        (r"\bGROUND\s*FLOOR\b", "LEVEL_0"),
+        (r"\b(?:AFDEK\.?\s*)?(?:GELIJKVLOERS|GLIJKVLOERS|GLV|GROUND\s*FLOOR)\b", "LEVEL_0"),
+        (r"\bAFDEK\s*\+?0\b", "LEVEL_0"),
         (r"\b(?:RDC|REZ(?:-DE-CHAUSSEE)?)\b", "LEVEL_0"),
         (r"\b(?:BK|NIV|NIVEAU|BOVEN|LEVEL)\s*\+?0\b", "LEVEL_0"),
         (r"\b(?:GL|GV)\b", "LEVEL_0"),
+        (r"\bAFDEK\s*\+?1\b", "LEVEL_1"),
         (r"\b(?:1(?:STE|E)?\s+VERDIEPING|VERDIEP(?:ING)?\s*\+?1|BOVEN\s*\+?1|LEVEL\s*\+?1|BK\s*\+?1|NIV(?:EAU)?\s*\+?1|ETAGE\s*1)\b", "LEVEL_1"),
+        (r"\bAFDEK\s*\+?2\b", "LEVEL_2"),
         (r"\b(?:2(?:DE|E)?\s+VERDIEPING|VERDIEP(?:ING)?\s*\+?2|BOVEN\s*\+?2|LEVEL\s*\+?2|BK\s*\+?2|NIV(?:EAU)?\s*\+?2|ETAGE\s*2)\b", "LEVEL_2"),
+        (r"\bAFDEK\s*\+?3\b", "LEVEL_3"),
+        (r"\b(?:3(?:DE|E)?\s+VERDIEPING|VERDIEP(?:ING)?\s*\+?3|BOVEN\s*\+?3|LEVEL\s*\+?3|BK\s*\+?3|NIV(?:EAU)?\s*\+?3|ETAGE\s*3)\b", "LEVEL_3"),
         (r"\b(?:DAK|PLAT\s*DAK|ROOF)\b", "ROOF"),
         (r"\b(?:KELDER|SOUTERRAIN|BASEMENT)\b", "LEVEL_-1"),
     ]
@@ -487,7 +491,14 @@ def normalize_storey_key(text):
         if re.search(pattern, normalized, re.I):
             return value
 
-    for pat in [r"NIV\+?(-?\d+)", r"BOVEN\+?(-?\d+)", r"NIVEAU\+?(-?\d+)", r"LEVEL\+?(-?\d+)", r"BK\+?(-?\d+)"]:
+    for pat in [
+        r"AFDEK\+?(-?\d+)",
+        r"NIV\+?(-?\d+)",
+        r"BOVEN\+?(-?\d+)",
+        r"NIVEAU\+?(-?\d+)",
+        r"LEVEL\+?(-?\d+)",
+        r"BK\+?(-?\d+)",
+    ]:
         m = re.search(pat, compact)
         if m:
             return f"LEVEL_{m.group(1)}"
@@ -2476,7 +2487,8 @@ def generate():
 
         try:
             supplier = extract_supplier_data(supplier_path)
-            design = extract_design_data(design_path, supplier_full_text=supplier.get("full_text", ""))
+            design = extract_design_data(design_path, supplier_full_text=(supplier.get("full_text", "") + "
+" + os.path.basename(supplier_path)))
         except ValueError as exc:
             app.logger.warning("PDF processing failed: %s", exc)
             return str(exc), 400
