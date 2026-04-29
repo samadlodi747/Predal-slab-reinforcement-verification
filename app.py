@@ -2486,16 +2486,20 @@ def generate():
             logo_file.save(logo_path)
 
         try:
+            supplier = extract_supplier_data(supplier_path)
             design = extract_design_data(
                 design_path,
-                supplier_full_text=(supplier.get("full_text", "") + "\n" + os.path.basename(supplier_path)),
+                supplier_full_text=(supplier.get("full_text", "") + "\n" + os.path.basename(supplier_file.filename or supplier_path)),
             )
         except ValueError as exc:
             app.logger.warning("PDF processing failed: %s", exc)
             return str(exc), 400
-        except Exception:
+        except Exception as exc:
             app.logger.exception("Unexpected processing error")
-            return "The uploaded files could not be processed. Please try a cleaner PDF export.", 400
+            return (
+                "The uploaded files could not be processed. "
+                f"Stage: extraction. Error: {type(exc).__name__}: {str(exc)[:220]}"
+            ), 400
 
         if not supplier["rows"]:
             return (
