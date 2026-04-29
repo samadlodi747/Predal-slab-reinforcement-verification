@@ -674,6 +674,66 @@ def _extract_design_total_thickness_mm(text):
         return _most_common(notes) * 10
     return None
 
+
+def _extract_design_total_thickness_mm_from_blocks(primary_blocks, fallback_blocks=None):
+    def _scan(blocks):
+        values = []
+        if not blocks:
+            return values
+
+        number_only_re = re.compile(r"^\s*(\d{1,2})\s*$")
+        for block in blocks:
+            text = str(block[4] or "")
+            compact = clean_spaces(text)
+            if not re.search(r"\bPredallen\b", compact, re.I):
+                continue
+
+            x0, y0, x1, y1 = block[:4]
+
+            m = re.search(r"bk\s*:\s*([+\-]?\d+)\s*ok\s*:\s*([+\-]?\d+)", compact, re.I)
+            if m:
+                try:
+                    diff = abs(int(m.group(1)) - int(m.group(2)))
+                except Exception:
+                    diff = None
+                if diff is not None and 5 <= diff <= 60:
+                    values.append(diff * 10)
+
+            nearby = []
+            center_x = (x0 + x1) / 2.0
+            for other in blocks:
+                other_text = str(other[4] or "")
+                m_num = number_only_re.match(other_text)
+                if not m_num:
+                    continue
+                value = int(m_num.group(1))
+                if not (5 <= value <= 60):
+                    continue
+
+                ox0, oy0, ox1, oy1 = other[:4]
+                other_center_x = (ox0 + ox1) / 2.0
+                other_center_y = (oy0 + oy1) / 2.0
+                dy = y0 - other_center_y
+                if -6 <= dy <= 90 and abs(other_center_x - center_x) <= 75:
+                    distance = abs(other_center_x - center_x) + max(dy, 0)
+                    nearby.append((distance, value))
+
+            if nearby:
+                nearby.sort(key=lambda item: item[0])
+                values.append(nearby[0][1] * 10)
+
+        return values
+
+    primary_values = _scan(primary_blocks)
+    if primary_values:
+        return _most_common(primary_values)
+
+    fallback_values = _scan(fallback_blocks)
+    if fallback_values:
+        return _most_common(fallback_values)
+
+    return None
+
 def _family_pattern():
     return re.compile(
         r"HW\s*([0-9]+(?:[\.,][0-9]+)?)\s*cm[²2]/l[mn]"
@@ -756,7 +816,12 @@ def extract_design_data(pdf_path, supplier_full_text=None):
 
     slab_notes = sorted(set(re.findall(r"Predallen\s+\d\s*\+\s*\d+", search_text, re.I)))
     supplier_det_note = "supplier" if re.search(r"Dikte van de predalplaat.*leverancier", full_text, re.I) else None
-    total_thickness_mm = _extract_design_total_thickness_mm(search_text)
+    all_blocks = [block for page in pages for block in page["blocks"]]
+    total_thickness_mm = (
+        _extract_design_total_thickness_mm_from_blocks(local_blocks, all_blocks)
+        or _extract_design_total_thickness_mm(search_text)
+        or _extract_design_total_thickness_mm(full_text)
+    )
 
     return {
         "families": sorted(families),
