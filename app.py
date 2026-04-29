@@ -769,6 +769,77 @@ def _parse_design_families_from_text(text):
     return families
 
 
+
+def _extract_families_from_blocks(blocks):
+    families = set()
+    for block in blocks or []:
+        try:
+            families |= _parse_design_families_from_text(clean_spaces(block[4]))
+        except Exception:
+            continue
+    return families
+
+
+def _page_storey_score_from_text(page_text, storey_hint):
+    txt = re.sub(r"[\r\n\t]+", " ", str(page_text or "").upper())
+    compact = re.sub(r"\s+", "", txt)
+
+    if storey_hint == "FOUNDATION":
+        return 100 if re.search(r"FUNDERINGSPLAAT|FUNDERING", compact) else 0
+
+    if storey_hint == "ROOF":
+        return 40 * len(re.findall(r"\b(?:DAK|PLAT\s*DAK|ROOF)\b", txt))
+
+    if not storey_hint or not str(storey_hint).startswith("LEVEL_"):
+        return 0
+
+    try:
+        lvl = int(str(storey_hint).split("_", 1)[1])
+    except Exception:
+        return 0
+
+    score = 0
+    score += 50 * len(re.findall(rf"\bB{lvl}\.\d+[A-Z]?\b", txt))
+    score += 15 * len(re.findall(rf"\bAFDEK\s*\+?{lvl}\b", txt))
+    score += 10 * len(re.findall(rf"\b(?:LEVEL|NIV(?:EAU)?|BK|BOVEN)\s*\+?{lvl}\b", txt))
+    score += 4 * len(re.findall(rf"\bB{lvl}(?::|\b)", txt))
+
+    if lvl == 0:
+        score += 10 * len(re.findall(r"\b(?:GELIJKVLOERS|GROUND\s*FLOOR|RDC|REZ(?:-DE-CHAUSSEE)?|GL|GV)\b", txt))
+
+    if lvl < 0:
+        score += 10 * len(re.findall(r"\b(?:KELDER|SOUTERRAIN|BASEMENT)\b", txt))
+
+    return score
+
+
+def _select_candidate_page_indexes_from_pages(pages, storey_hint):
+    if not pages:
+        return []
+    scored = []
+    for idx, page in enumerate(pages):
+        score = _page_storey_score_from_text(page.get("text", ""), storey_hint)
+        scored.append((idx, score))
+
+    max_score = max(score for _, score in scored) if scored else 0
+    if max_score <= 0:
+        return []
+
+    threshold = max(1, int(max_score * 0.45))
+    selected = [idx for idx, score in scored if score >= threshold and score > 0]
+    return selected or [idx for idx, score in scored if score == max_score]
+
+
+def _select_candidate_page_indexes_from_doc(doc, storey_hint):
+    page_texts = []
+    for page in doc:
+        try:
+            page_texts.append({"text": page.get_text("text", sort=False)})
+        except Exception:
+            page_texts.append({"text": ""})
+    return _select_candidate_page_indexes_from_pages(page_texts, storey_hint)
+
+
 def extract_design_data(pdf_path, supplier_full_text=None):
     pages, full_text = read_pdf(pdf_path)
     storey_regions = _extract_storey_regions(pages)
@@ -782,14 +853,36 @@ def extract_design_data(pdf_path, supplier_full_text=None):
         local_blocks = list(region.get("blocks", []))
         local_text = region.get("text", "")
 
-    search_text = local_text or full_text
+    candidate_page_indexes = _select_candidate_page_indexes_from_pages(pages, storey_hint)
+    candidate_page_blocks = [
+        block
+        for idx, page in enumerate(pages)
+        if (not candidate_page_indexes or idx in candidate_page_indexes)
+        for block in page["blocks"]
+    ]
+    candidate_page_text = "\n".join(
+        page["text"] for idx, page in enumerate(pages) if (not candidate_page_indexes or idx in candidate_page_indexes)
+    )
+
+    search_text = candidate_page_text or local_text or full_text
+
+    local_families = _extract_families_from_blocks(local_blocks)
+    if not local_families and local_text:
+        local_families |= _parse_design_families_from_text(local_text)
+
+    page_families = _extract_families_from_blocks(candidate_page_blocks)
+    if not page_families and candidate_page_text:
+        page_families |= _parse_design_families_from_text(candidate_page_text)
+
+    global_families = set()
+    for page in pages:
+        global_families |= _extract_families_from_blocks(page["blocks"])
+    if not global_families:
+        global_families |= _parse_design_families_from_text(full_text)
 
     families = set()
-    for block in local_blocks:
-        families |= _parse_design_families_from_text(clean_spaces(block[4]))
-
-    if not families and local_text:
-        families |= _parse_design_families_from_text(local_text)
+    families |= local_families
+    families |= page_families
 
     if not families and storey_regions:
         for region in storey_regions.values():
@@ -797,12 +890,7 @@ def extract_design_data(pdf_path, supplier_full_text=None):
                 families.add(tuple(fam))
 
     if not families:
-        for page in pages:
-            for block in page["blocks"]:
-                families |= _parse_design_families_from_text(clean_spaces(block[4]))
-
-    if not families:
-        families |= _parse_design_families_from_text(full_text)
+        families |= global_families
 
     concrete = None
     steel = None
@@ -829,8 +917,9 @@ def extract_design_data(pdf_path, supplier_full_text=None):
     supplier_det_note = "supplier" if re.search(r"Dikte van de predalplaat.*leverancier", full_text, re.I) else None
     all_blocks = [block for page in pages for block in page["blocks"]]
     total_thickness_mm = (
-        _extract_design_total_thickness_mm_from_blocks(local_blocks, all_blocks)
+        _extract_design_total_thickness_mm_from_blocks(local_blocks, candidate_page_blocks or all_blocks)
         or _extract_design_total_thickness_mm(search_text)
+        or _extract_design_total_thickness_mm(candidate_page_text)
         or _extract_design_total_thickness_mm(full_text)
     )
 
@@ -847,10 +936,11 @@ def extract_design_data(pdf_path, supplier_full_text=None):
         "storey_match_method": storey_match_method,
         "available_storeys": sorted(storey_regions.keys()),
         "local_text": local_text,
+        "candidate_page_indexes": candidate_page_indexes,
+        "candidate_page_text": candidate_page_text,
         "total_thickness_mm": total_thickness_mm,
         "source_pdf_path": pdf_path,
     }
-
 
 def detect_supplier_format(full_text):
     txt = (full_text or "").lower()
@@ -1582,7 +1672,10 @@ def _extract_predal_label_positions(pdf_path, storey_hint=None):
     positions = {}
     try:
         with fitz.open(pdf_path) as doc:
+            candidate_pages = set(_select_candidate_page_indexes_from_doc(doc, storey_hint))
             for page in doc:
+                if candidate_pages and page.number not in candidate_pages:
+                    continue
                 block_fallback = {}
                 for block in page.get_text("blocks", sort=False):
                     block_labels = _iter_predal_labels_from_block_text(block[4], storey_hint=storey_hint)
@@ -1610,7 +1703,6 @@ def _extract_predal_label_positions(pdf_path, storey_hint=None):
     except Exception:
         return {}
     return positions
-
 
 def _extract_design_label_family_map(pdf_path, storey_hint=None):
     label_positions = _extract_predal_label_positions(pdf_path, storey_hint=storey_hint)
@@ -1756,7 +1848,10 @@ def _extract_design_family_points(pdf_path, storey_hint=None):
     points = []
     try:
         with fitz.open(pdf_path) as doc:
+            candidate_pages = set(_select_candidate_page_indexes_from_doc(doc, storey_hint))
             for page in doc:
+                if candidate_pages and page.number not in candidate_pages:
+                    continue
                 drawings = page.get_drawings()
                 for block in page.get_text("blocks", sort=False):
                     parsed = _parse_design_families_from_text(clean_spaces(block[4]))
@@ -1779,7 +1874,6 @@ def _extract_design_family_points(pdf_path, storey_hint=None):
     except Exception:
         return []
     return points
-
 
 def _nearest_design_family_point(point, family_points, page=None):
     if not family_points:
