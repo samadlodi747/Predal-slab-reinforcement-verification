@@ -2486,9 +2486,10 @@ def generate():
             logo_file.save(logo_path)
 
         try:
-            supplier = extract_supplier_data(supplier_path)
-            design = extract_design_data(design_path, supplier_full_text=(supplier.get("full_text", "") + "
-" + os.path.basename(supplier_path)))
+            design = extract_design_data(
+                design_path,
+                supplier_full_text=(supplier.get("full_text", "") + "\n" + os.path.basename(supplier_path)),
+            )
         except ValueError as exc:
             app.logger.warning("PDF processing failed: %s", exc)
             return str(exc), 400
