@@ -1961,6 +1961,48 @@ def _cluster_design_families_for_plate_display(rows, design_families):
     return assignments
 
 
+
+
+def _is_confident_cluster_plate_family_map(cluster_map, rows, design_families):
+    if not cluster_map or not rows or not design_families:
+        return False
+
+    assigned = [cluster_map.get(int(r.get("plate") or 0)) for r in rows if cluster_map.get(int(r.get("plate") or 0))]
+    distinct_cluster = {_design_family_key(f) for f in assigned if f}
+    if len(distinct_cluster) < 2:
+        return False
+
+    design_family_keys = {_design_family_key(f) for f in design_families or []}
+    supplier_exact = []
+    mismatches = 0
+    comparable = 0
+
+    for row in rows:
+        plate = int(row.get("plate") or 0)
+        mapped = cluster_map.get(plate)
+        exact = _supplier_exact_family_key(row, design_family_keys)
+        if exact:
+            supplier_exact.append(exact)
+            comparable += 1
+            if _design_family_key(mapped) != exact:
+                mismatches += 1
+
+    supplier_exact_distinct = set(supplier_exact)
+    if len(supplier_exact_distinct) >= 2:
+        if len(distinct_cluster) < 2:
+            return False
+        if comparable and (mismatches / float(comparable)) > 0.35:
+            return False
+
+    dominant = max(
+        (sum(1 for fam in assigned if _design_family_key(fam) == fam_key) for fam_key in distinct_cluster),
+        default=0,
+    )
+    if assigned and (dominant / float(len(assigned))) > 0.80 and len(distinct_cluster) < min(3, max(2, len(supplier_exact_distinct) or 2)):
+        return False
+
+    return True
+
 def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.10):
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
     supplier_dw = float(row.get("dwars_cm2m") or 0.0)
@@ -1984,7 +2026,9 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     design_families = list(design.get("families", []))
     plate_family_map = _build_plan_registered_plate_family_map(design, supplier)
     if not plate_family_map:
-        plate_family_map = _cluster_design_families_for_plate_display(rows, design_families)
+        cluster_map = _cluster_design_families_for_plate_display(rows, design_families)
+        if _is_confident_cluster_plate_family_map(cluster_map, rows, design_families):
+            plate_family_map = cluster_map
 
     comparison_rows = []
     matched_ok = 0
