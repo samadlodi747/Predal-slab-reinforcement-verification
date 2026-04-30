@@ -19,9 +19,44 @@ from reportlab.lib.utils import ImageReader
 from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, TableStyle
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+# ---------------------------------------------------------------------------
+# Tunable extraction & comparison constants
+# Tweak these when calibrating the parsers against new supplier layouts.
+# ---------------------------------------------------------------------------
+
+# Upload limits
+MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+
+# Predal thickness sanity range (cm) — values outside this are ignored when
+# scanning design notes for slab build-up.
+MIN_PREDAL_THICKNESS_CM = 5
+MAX_PREDAL_THICKNESS_CM = 60
+
+# Geometry / proximity (PDF user units) used when grouping blocks and matching
+# plates between design and supplier drawings.
+STOREY_REGION_EXPAND_PX = 320
+PLATE_FAMILY_PROXIMITY_PX = 320.0
+
+# Plate length grouping
+LENGTH_GROUP_SPLIT_JUMP_MM = 1500
+
+# Family matching tolerance (cm²/m): supplier may round, so allow a small
+# surplus before flagging a CHECK.
+FAMILY_MATCH_ROUNDING_TOL = 0.10
+
+# Length-band thresholds for design-family clustering (mm)
+SHORT_PLATE_MAX_LENGTH_MM = 3000
+MEDIUM_PLATE_MAX_LENGTH_MM = 5000
+
+# Pass-plate detection (long plate split into one narrow strip + one normal)
+PASS_PLATE_MIN_LENGTH_MM = 5000
+PASS_PLATE_NARROW_WIDTH_MM = 800
+PASS_PLATE_NORMAL_WIDTH_MM = 1800
+
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
-app.config["MAX_CONTENT_LENGTH"] = 40 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
 INDEX_HTML = """
@@ -564,7 +599,7 @@ def _collect_storey_local_text(pages, storey_hint):
         storey_blocks = [b for b in blocks if prefix_re.search(clean_spaces(b[4]))]
         if not storey_blocks:
             continue
-        zone = _bbox_expand(_bbox_union(storey_blocks), dx=320, dy=320)
+        zone = _bbox_expand(_bbox_union(storey_blocks), dx=STOREY_REGION_EXPAND_PX, dy=STOREY_REGION_EXPAND_PX)
         local_blocks = [b for b in blocks if _bbox_intersects((b[0], b[1], b[2], b[3]), zone)]
         local_text_parts.extend(clean_spaces(b[4]) for b in local_blocks if clean_spaces(b[4]))
 
@@ -585,7 +620,7 @@ def _extract_storey_regions(pages):
                 anchors_by_storey.setdefault(hint, []).append(block)
 
         for hint, anchors in anchors_by_storey.items():
-            zone = _bbox_expand(_bbox_union(anchors), dx=320, dy=320)
+            zone = _bbox_expand(_bbox_union(anchors), dx=STOREY_REGION_EXPAND_PX, dy=STOREY_REGION_EXPAND_PX)
             local_blocks = [b for b in blocks if _bbox_intersects((b[0], b[1], b[2], b[3]), zone)]
             region = regions.setdefault(hint, {"blocks": [], "page_indexes": set(), "anchor_blocks": []})
             region["blocks"].extend(local_blocks)
@@ -657,7 +692,7 @@ def _extract_design_total_thickness_mm(text):
     leading_notes = []
     for m in re.finditer(r"\b(\d{1,2})\b\s*bk\s*:\s*[+\-]?\d+\s*ok\s*:\s*[+\-]?\d+\s*Predallen", txt, re.I):
         val = int(m.group(1))
-        if 5 <= val <= 60:
+        if MIN_PREDAL_THICKNESS_CM <= val <= MAX_PREDAL_THICKNESS_CM:
             leading_notes.append(val * 10)
     if leading_notes:
         return _most_common(leading_notes)
@@ -669,7 +704,7 @@ def _extract_design_total_thickness_mm(text):
             diff = abs(int(m.group(1)) - int(m.group(2)))
         except Exception:
             continue
-        if 5 <= diff <= 60:
+        if MIN_PREDAL_THICKNESS_CM <= diff <= MAX_PREDAL_THICKNESS_CM:
             diffs.append(diff * 10)
     if diffs:
         return _most_common(diffs)
@@ -678,7 +713,10 @@ def _extract_design_total_thickness_mm(text):
     notes = []
     for m in re.finditer(r"Predallen", txt, re.I):
         window = txt[max(0, m.start() - 120): m.end() + 20]
-        nums = [int(n) for n in re.findall(r"\b(\d{1,2})\b", window) if 5 <= int(n) <= 60]
+        nums = [
+            int(n) for n in re.findall(r"\b(\d{1,2})\b", window)
+            if MIN_PREDAL_THICKNESS_CM <= int(n) <= MAX_PREDAL_THICKNESS_CM
+        ]
         if nums:
             notes.append(max(nums))
     if notes:
@@ -707,7 +745,7 @@ def _extract_design_total_thickness_mm_from_blocks(primary_blocks, fallback_bloc
                     diff = abs(int(m.group(1)) - int(m.group(2)))
                 except Exception:
                     diff = None
-                if diff is not None and 5 <= diff <= 60:
+                if diff is not None and MIN_PREDAL_THICKNESS_CM <= diff <= MAX_PREDAL_THICKNESS_CM:
                     values.append(diff * 10)
 
             nearby = []
@@ -718,7 +756,7 @@ def _extract_design_total_thickness_mm_from_blocks(primary_blocks, fallback_bloc
                 if not m_num:
                     continue
                 value = int(m_num.group(1))
-                if not (5 <= value <= 60):
+                if not (MIN_PREDAL_THICKNESS_CM <= value <= MAX_PREDAL_THICKNESS_CM):
                     continue
 
                 ox0, oy0, ox1, oy1 = other[:4]
@@ -1376,6 +1414,7 @@ def parse_van_thuyne_table(pdf_path, full_text):
                     parser_label = "Van Thuyne word-grid parser"
                     break
     except Exception:
+        app.logger.warning("Van Thuyne table parser failed", exc_info=True)
         rows = []
 
     rows.sort(key=lambda x: x["plate"])
@@ -1701,6 +1740,7 @@ def _extract_predal_label_positions(pdf_path, storey_hint=None):
                     else:
                         positions[label] = fallback
     except Exception:
+        app.logger.warning("Predal label position extraction failed for %s", pdf_path, exc_info=True)
         return {}
     return positions
 
@@ -1719,6 +1759,7 @@ def _extract_design_label_family_map(pdf_path, storey_hint=None):
                     for fam in parsed:
                         families.append({"family": tuple(fam), "center": center, "page": page.number})
     except Exception:
+        app.logger.warning("Design label family map extraction failed for %s", pdf_path, exc_info=True)
         return {}, label_positions
 
     label_family_map = {}
@@ -1763,6 +1804,7 @@ def _extract_supplier_plan_plate_positions(pdf_path):
                             }
                             break
     except Exception:
+        app.logger.warning("Supplier plan plate position extraction failed for %s", pdf_path, exc_info=True)
         return {}
     return positions
 
@@ -1784,6 +1826,7 @@ def _fit_affine_transform(source_points, target_points):
         params, _, _, _ = np.linalg.lstsq(matrix, vector, rcond=None)
         return tuple(float(v) for v in params.tolist())
     except Exception:
+        app.logger.warning("Affine transform fit failed", exc_info=True)
         return None
 
 
@@ -1872,6 +1915,7 @@ def _extract_design_family_points(pdf_path, storey_hint=None):
                             }
                         )
     except Exception:
+        app.logger.warning("Design family point extraction failed for %s", pdf_path, exc_info=True)
         return []
     return points
 
@@ -1908,7 +1952,7 @@ def _supplier_exact_family_key(row, design_family_keys):
     return fam if fam in design_family_keys else None
 
 
-def _build_supplier_family_components(transformed_positions, supplier_rows_by_plate, design_family_keys, max_dist=320.0):
+def _build_supplier_family_components(transformed_positions, supplier_rows_by_plate, design_family_keys, max_dist=PLATE_FAMILY_PROXIMITY_PX):
     adjacency = {}
     supplier_family_by_plate = {}
 
@@ -2029,7 +2073,7 @@ def _build_plan_registered_plate_family_map(design, supplier):
     )
 
 
-def _select_design_family_for_supplier_row_display(row, design_families, rounding_tol=0.10):
+def _select_design_family_for_supplier_row_display(row, design_families, rounding_tol=FAMILY_MATCH_ROUNDING_TOL):
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
     supplier_dw = float(row.get("dwars_cm2m") or 0.0)
     candidates = []
@@ -2057,7 +2101,7 @@ def _select_design_family_for_supplier_row_display(row, design_families, roundin
     return fallback[0][4]
 
 
-def _supplier_satisfies_design_family(row, family, rounding_tol=0.10):
+def _supplier_satisfies_design_family(row, family, rounding_tol=FAMILY_MATCH_ROUNDING_TOL):
     if not family:
         return False
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
@@ -2066,7 +2110,7 @@ def _supplier_satisfies_design_family(row, family, rounding_tol=0.10):
     return supplier_hw + rounding_tol >= hw and supplier_dw + rounding_tol >= dw
 
 
-def _group_supplier_rows_by_length_sequence(rows, split_jump_mm=1500):
+def _group_supplier_rows_by_length_sequence(rows, split_jump_mm=LENGTH_GROUP_SPLIT_JUMP_MM):
     if not rows:
         return []
     ordered = sorted(rows, key=lambda r: int(r.get("plate") or 0))
@@ -2103,7 +2147,12 @@ def _cluster_design_families_for_plate_display(rows, design_families):
         lengths = [int(r.get("length") or 0) for r in group]
         if not widths or not lengths:
             continue
-        if max(lengths) >= 5000 and min(widths) <= 800 and max(widths) >= 1800 and len(group) >= 2:
+        if (
+            max(lengths) >= PASS_PLATE_MIN_LENGTH_MM
+            and min(widths) <= PASS_PLATE_NARROW_WIDTH_MM
+            and max(widths) >= PASS_PLATE_NORMAL_WIDTH_MM
+            and len(group) >= 2
+        ):
             for row in group:
                 assignments[int(row["plate"])] = highest
             break
@@ -2119,9 +2168,9 @@ def _cluster_design_families_for_plate_display(rows, design_families):
         if not lengths:
             continue
         mean_len = sum(lengths) / float(len(lengths))
-        if mean_len < 3000:
+        if mean_len < SHORT_PLATE_MAX_LENGTH_MM:
             fam = lowest
-        elif mean_len < 5000:
+        elif mean_len < MEDIUM_PLATE_MAX_LENGTH_MM:
             fam = mid_family
         else:
             fam = high_family
@@ -2173,7 +2222,7 @@ def _is_confident_cluster_plate_family_map(cluster_map, rows, design_families):
 
     return True
 
-def _match_design_family_for_supplier_row(row, design_families, rounding_tol=0.10):
+def _match_design_family_for_supplier_row(row, design_families, rounding_tol=FAMILY_MATCH_ROUNDING_TOL):
     supplier_hw = float(row.get("langs_cm2m") or 0.0)
     supplier_dw = float(row.get("dwars_cm2m") or 0.0)
     candidates = []
@@ -2280,15 +2329,63 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     if design_fire is not None and supplier_fire_candidates:
         fire_status = "OK" if all(v >= design_fire for v in supplier_fire_candidates) else "CHECK"
 
+    # ----- Build human-readable cell strings for the global comparison table.
+    # These are extracted here (instead of nested inside the table literal)
+    # so the logic is auditable when calibrating against new supplier formats.
+
+    parser_label = supplier.get("supplier_format") or "Not found"
+    parser_status = "OK" if rows else "CHECK"
+
+    storey_label = design.get("storey_hint") or "Full document fallback"
+    storey_method = design.get("storey_match_method") or "-"
+    storey_status = "OK" if design.get("storey_hint") else "CHECK"
+
+    design_concrete_text = f"{design['concrete'] or 'Not found'} minimum"
+    supplier_concrete_text = ", ".join(supplier_concretes) or "Not found"
+
+    design_steel_text = design["steel"] or "Not found"
+    supplier_steel_text = supplier["supplier_steel"] or "Not found"
+
+    if design["supplier_det_note"]:
+        design_predal_text = "Supplier to determine (design note)"
+    else:
+        design_predal_text = "Design note not found"
+
+    if predal_thicknesses:
+        supplier_predal_text = ", ".join(str(v) for v in predal_thicknesses) + " mm"
+    else:
+        supplier_predal_text = "Not found"
+
+    if design.get("total_thickness_mm"):
+        design_total_text = f"{design['total_thickness_mm']} mm"
+    elif design["slab_notes"]:
+        design_total_text = ", ".join(design["slab_notes"])
+    else:
+        design_total_text = "Not clearly readable on design sheet"
+
+    if total_thicknesses:
+        supplier_total_text = ", ".join(str(v) for v in total_thicknesses) + " mm"
+    else:
+        supplier_total_text = "Not found"
+
+    design_mesh_text = design["top_mesh"] or "Not found"
+    supplier_mesh_text = supplier["top_mesh_note"] or "Not found"
+
+    design_fire_text = design["fire_req"] or "Not found"
+    if supplier_fires:
+        supplier_fire_text = ", ".join(supplier_fires)
+    else:
+        supplier_fire_text = supplier["fire_default"] or "Not found"
+
     global_rows = [
-        ["Detected supplier parser", "Auto detection", supplier.get("supplier_format", "Not found"), "OK" if rows else "CHECK"],
-        ["Selected design storey", design.get("storey_hint") or "Full document fallback", design.get("storey_match_method") or "-", "OK" if design.get("storey_hint") else "CHECK"],
-        ["Concrete class", f"{design['concrete'] or 'Not found'} minimum", ", ".join(supplier_concretes) or "Not found", concrete_status],
-        ["Steel grade", design["steel"] or "Not found", supplier["supplier_steel"] or "Not found", steel_status],
-        ["Predal thickness", "Supplier to determine (design note)" if design["supplier_det_note"] else "Design note not found", ", ".join(str(v) for v in predal_thicknesses) + " mm" if predal_thicknesses else "Not found", predal_status],
-        ["Total slab thickness", (f"{design['total_thickness_mm']} mm" if design.get("total_thickness_mm") else (", ".join(design["slab_notes"]) if design["slab_notes"] else "Not clearly readable on design sheet")), ", ".join(str(v) for v in total_thicknesses) + " mm" if total_thicknesses else "Not found", total_status],
-        ["Mesh reinforcement", design["top_mesh"] or "Not found", supplier["top_mesh_note"] or "Not found", mesh_status],
-        ["Fire resistance", design["fire_req"] or "Not found", ", ".join(supplier_fires) if supplier_fires else (supplier["fire_default"] or "Not found"), fire_status],
+        ["Detected supplier parser", "Auto detection", parser_label, parser_status],
+        ["Selected design storey", storey_label, storey_method, storey_status],
+        ["Concrete class", design_concrete_text, supplier_concrete_text, concrete_status],
+        ["Steel grade", design_steel_text, supplier_steel_text, steel_status],
+        ["Predal thickness", design_predal_text, supplier_predal_text, predal_status],
+        ["Total slab thickness", design_total_text, supplier_total_text, total_status],
+        ["Mesh reinforcement", design_mesh_text, supplier_mesh_text, mesh_status],
+        ["Fire resistance", design_fire_text, supplier_fire_text, fire_status],
     ]
 
     dwars_ok = []
@@ -2396,7 +2493,7 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
                 y = h - draw_h - 8.5 * mm
                 canvas.drawImage(reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
             except Exception:
-                pass
+                app.logger.warning("Logo could not be drawn on report cover", exc_info=True)
             canvas.restoreState()
 
     def _draw_later_pages(canvas, doc_obj):
@@ -2620,4 +2717,7 @@ def generate():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Debug mode is opt-in via FLASK_DEBUG=1 to avoid leaking stack traces
+    # if this file is ever launched directly in a production-like environment.
+    debug_mode = os.environ.get("FLASK_DEBUG", "").lower() in {"1", "true", "yes"}
+    app.run(debug=debug_mode)
