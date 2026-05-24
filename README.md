@@ -1,5 +1,7 @@
 # Predal Reinforcement Verification Tool
 
+Automated structural verification tool for Predal slab reinforcement and bearing-direction validation using PDF drawing extraction, geometric mapping, and engineering comparison workflows.
+
 ## Overview
 This tool automates the verification of predal reinforcement by comparing structural design PDFs with supplier drawings.
 
@@ -64,6 +66,27 @@ The system is structured into four main steps:
 
 4. **Reporting**  
    Generate a structured PDF output  
+
+---
+
+## Modular Engineering Verification Pipeline
+
+The application follows a modular structural verification workflow:
+
+- geometric slab-region extraction
+- vector and raster bearing-direction detection
+- supplier plate region identification
+- plate-wise structural mapping
+- automated reinforcement verification
+- global and local bearing-direction comparison
+- PDF-based engineering report generation
+
+The modular architecture improves:
+- maintainability
+- scalability
+- supplier-format adaptability
+- debugging efficiency
+- engineering validation workflow
 
 ---
 
