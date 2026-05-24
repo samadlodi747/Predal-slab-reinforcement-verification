@@ -23,6 +23,8 @@ This tool aims to:
 - Extract supplier predal drawings (multiple formats)  
 - Plate-by-plate comparison (design vs supplier)  
 - Global parameter verification (concrete, mesh, thickness)  
+- Automatic slab bearing direction detection and comparison  
+- Plate-wise bearing direction verification by mapped slab/plate region  
 - Generate structured PDF report  
 - Optional company logo support  
 - Landscape / Portrait report layout  
@@ -32,14 +34,17 @@ This tool aims to:
 ## Workflow
 1. Upload design PDF and supplier PDF  
 2. System extracts relevant engineering data  
-3. Applies comparison logic  
-4. Generates a verification report  
+3. Detects global and plate-wise slab bearing directions  
+4. Maps supplier plates to structural slab regions  
+5. Applies reinforcement and bearing-direction comparison logic  
+6. Generates a verification report  
 
 ---
 
 ## Tech Stack
 - Python (Flask)
 - PyMuPDF (PDF text extraction)
+- OpenCV / NumPy (bearing arrow detection)
 - ReportLab (PDF generation)
 - Regex & rule-based parsing
 
@@ -64,15 +69,13 @@ The system is structured into four main steps:
 
 ## Limitations
 - Based on defined extraction logic and pattern recognition from drawings  
-- Accuracy depends on PDF quality and format consistency  
-- Requires engineering validation before final approval  
+- Accuracy depends on PDF quality and format consistency    
 
 ---
 
 ## Future Improvements
 - Better handling of different supplier formats  
-- Improved parsing accuracy  
-- Integration with pricing logic  
+- Improved parsing accuracy    
 - Semi-automated plan interpretation  
 
 ---
