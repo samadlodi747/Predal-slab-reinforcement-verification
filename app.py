@@ -9,7 +9,18 @@ from statistics import mean
 
 import fitz
 import numpy as np
+from bearing_compare import compare_bearing_direction
+from bearing_plate_compare import compare_plate_bearing_direction
+from bearing_direction_detector import (
+    extract_structural_bearing_direction,
+    extract_supplier_bearing_direction,
+)
 from flask import Flask, render_template_string, request, send_file
+from plate_bearing_mapper import (
+    extract_structural_slab_regions,
+    extract_supplier_plate_regions,
+    map_supplier_plates_to_structural_regions,
+)
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A3, landscape
@@ -2240,7 +2251,7 @@ def _match_design_family_for_supplier_row(row, design_families, rounding_tol=FAM
     return candidates[0][3]
 
 
-def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str=""):
+def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, report_orientation="landscape", report_date_str="", bearing_result=None, plate_bearing_result=None):
     rows = supplier["rows"]
     design_families = list(design.get("families", []))
     plate_family_map = _build_plan_registered_plate_family_map(design, supplier)
@@ -2387,6 +2398,49 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         ["Mesh reinforcement", design_mesh_text, supplier_mesh_text, mesh_status],
         ["Fire resistance", design_fire_text, supplier_fire_text, fire_status],
     ]
+
+    bearing_result = bearing_result or {}
+    bearing_structural_direction = bearing_result.get("structural_direction") or "UNKNOWN"
+    bearing_supplier_direction = bearing_result.get("supplier_direction") or "UNKNOWN"
+    bearing_status = bearing_result.get("status") or "MISMATCH"
+    bearing_structural_conf = float(bearing_result.get("structural_confidence") or 0.0)
+    bearing_supplier_conf = float(bearing_result.get("supplier_confidence") or 0.0)
+    bearing_confidence = float(bearing_result.get("confidence") or min(bearing_structural_conf, bearing_supplier_conf))
+    bearing_structural_page = bearing_result.get("structural_page") or "-"
+    bearing_supplier_page = bearing_result.get("supplier_page") or "-"
+    bearing_structural_len = int(bearing_result.get("structural_line_length") or 0)
+    bearing_supplier_len = int(bearing_result.get("supplier_line_length") or 0)
+    bearing_reason = bearing_result.get("reason") or ""
+
+    bearing_rows = [
+        [
+            "Bearing direction",
+            f"{bearing_structural_direction}",
+            f"{bearing_supplier_direction}",
+            bearing_status,
+        ],
+        [
+            "Confidence",
+            f"{bearing_structural_conf:.2f}",
+            f"{bearing_supplier_conf:.2f}",
+            f"{bearing_confidence:.2f}",
+        ],
+        [
+            "Detected page",
+            str(bearing_structural_page),
+            str(bearing_supplier_page),
+            "-",
+        ],
+        [
+            "Detected line length",
+            f"{bearing_structural_len} px" if bearing_structural_len else "Not found",
+            f"{bearing_supplier_len} px" if bearing_supplier_len else "Not found",
+            "-",
+        ],
+    ]
+
+    plate_bearing_rows = list((plate_bearing_result or {}).get("rows") or [])
+    plate_bearing_summary = (plate_bearing_result or {}).get("summary") or {}
 
     dwars_ok = []
     for row in rows:
@@ -2541,9 +2595,13 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
     if is_landscape:
         comp_col_widths = [22 * mm, 58 * mm, 122 * mm, 132 * mm, 28 * mm]
         global_col_widths = [48 * mm, 96 * mm, 182 * mm, 26 * mm]
+        bearing_col_widths = [48 * mm, 120 * mm, 120 * mm, 64 * mm]
+        plate_bearing_col_widths = [42 * mm, 114 * mm, 114 * mm, 34 * mm]
     else:
         comp_col_widths = [18 * mm, 44 * mm, 78 * mm, 90 * mm, 22 * mm]
         global_col_widths = [38 * mm, 64 * mm, 110 * mm, 20 * mm]
+        bearing_col_widths = [38 * mm, 72 * mm, 72 * mm, 70 * mm]
+        plate_bearing_col_widths = [30 * mm, 76 * mm, 76 * mm, 30 * mm]
 
     comp_table_data = [[
         Paragraph("Plate", styles["TableHead"]),
@@ -2609,6 +2667,95 @@ def build_report_pdf_bytes(design, supplier, project_title="", logo_path=None, r
         color = "#166B45" if status == "OK" else "#A05A00"
         global_tbl.setStyle(TableStyle([("TEXTCOLOR", (-1, i), (-1, i), HexColor(color)), ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold")]))
     story.append(global_tbl)
+    story.append(Spacer(1, 10))
+
+    story.append(_section_chip("BEARING DIRECTION VERIFICATION"))
+    story.append(Spacer(1, 5))
+    bearing_table_data = [[
+        Paragraph("Parameter", styles["TableHead"]),
+        Paragraph("Structural", styles["TableHead"]),
+        Paragraph("Supplier", styles["TableHead"]),
+        Paragraph("Status / value", styles["TableHead"]),
+    ]]
+    for row in bearing_rows:
+        bearing_table_data.append([Paragraph(v, styles["TableCell"]) for v in row])
+
+    bearing_tbl = LongTable(bearing_table_data, colWidths=bearing_col_widths, repeatRows=1)
+    bearing_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), PREMIUM_NAVY),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, PREMIUM_GOLD),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.55, PREMIUM_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PREMIUM_ROW]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
+    ]))
+    bearing_status_color = "#166B45" if bearing_status == "OK" else "#A05A00"
+    bearing_tbl.setStyle(TableStyle([
+        ("TEXTCOLOR", (-1, 1), (-1, 1), HexColor(bearing_status_color)),
+        ("FONTNAME", (-1, 1), (-1, 1), "Helvetica-Bold"),
+    ]))
+    story.append(bearing_tbl)
+    if bearing_reason:
+        story.append(Spacer(1, 5))
+        story.append(Paragraph(bearing_reason, styles["SmallX"]))
+    story.append(Spacer(1, 10))
+
+    story.append(_section_chip("PLATE-WISE BEARING DIRECTION VERIFICATION"))
+    story.append(Spacer(1, 5))
+    plate_bearing_table_data = [[
+        Paragraph("Plate", styles["TableHead"]),
+        Paragraph("Structural Direction", styles["TableHead"]),
+        Paragraph("Supplier Direction", styles["TableHead"]),
+        Paragraph("Status", styles["TableHead"]),
+    ]]
+    if plate_bearing_rows:
+        for row in plate_bearing_rows:
+            plate_bearing_table_data.append([
+                Paragraph(str(row.get("plate") or "-"), styles["TableCell"]),
+                Paragraph(str(row.get("structural_direction") or "UNKNOWN"), styles["TableCell"]),
+                Paragraph(str(row.get("supplier_direction") or "UNKNOWN"), styles["TableCell"]),
+                Paragraph(str(row.get("status") or "CHECK"), styles["TableCell"]),
+            ])
+    else:
+        plate_bearing_table_data.append([
+            Paragraph("-", styles["TableCell"]),
+            Paragraph("UNKNOWN", styles["TableCell"]),
+            Paragraph("UNKNOWN", styles["TableCell"]),
+            Paragraph("CHECK", styles["TableCell"]),
+        ])
+
+    plate_bearing_tbl = LongTable(plate_bearing_table_data, colWidths=plate_bearing_col_widths, repeatRows=1)
+    plate_bearing_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), PREMIUM_NAVY),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, PREMIUM_GOLD),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.55, PREMIUM_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, PREMIUM_BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PREMIUM_ROW]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5.0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.0),
+    ]))
+    for i, row in enumerate(plate_bearing_table_data[1:], start=1):
+        status_text = row[-1].getPlainText() if hasattr(row[-1], "getPlainText") else ""
+        status_color = "#166B45" if status_text == "OK" else "#A05A00"
+        plate_bearing_tbl.setStyle(TableStyle([
+            ("TEXTCOLOR", (-1, i), (-1, i), HexColor(status_color)),
+            ("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"),
+        ]))
+    story.append(plate_bearing_tbl)
+    story.append(Spacer(1, 5))
+    story.append(Paragraph(
+        f"Plate-wise bearing checks: {int(plate_bearing_summary.get('ok') or 0)} OK / {int(plate_bearing_summary.get('total') or len(plate_bearing_rows))} plates.",
+        styles["SmallX"],
+    ))
     story.append(Spacer(1, 10))
 
     story.append(_section_chip("Engineering Conclusion"))
@@ -2692,6 +2839,41 @@ def generate():
                 f"Stage: extraction. Error: {type(exc).__name__}: {str(exc)[:220]}"
             ), 400
 
+        try:
+            structural_bearing = extract_structural_bearing_direction(design_path)
+        except Exception:
+            app.logger.warning("Structural bearing direction detection failed", exc_info=True)
+            structural_bearing = {"bearing_direction": "UNKNOWN", "confidence": 0.0, "page": None, "line_length": 0}
+
+        try:
+            supplier_bearing = extract_supplier_bearing_direction(supplier_path)
+        except Exception:
+            app.logger.warning("Supplier bearing direction detection failed", exc_info=True)
+            supplier_bearing = {"bearing_direction": "UNKNOWN", "confidence": 0.0, "page": None, "line_length": 0}
+
+        bearing_result = compare_bearing_direction(structural_bearing, supplier_bearing)
+
+        try:
+            structural_slab_regions = extract_structural_slab_regions(design_path)
+            supplier_plate_regions = extract_supplier_plate_regions(
+                supplier_path,
+                supplier_rows=supplier.get("rows"),
+            )
+            plate_bearing_mapping = map_supplier_plates_to_structural_regions(
+                supplier_plate_regions,
+                structural_slab_regions,
+                supplier_pdf_path=supplier_path,
+                structural_pdf_path=design_path,
+            )
+            plate_bearing_result = compare_plate_bearing_direction(
+                structural_slab_regions,
+                supplier_plate_regions,
+                plate_bearing_mapping,
+            )
+        except Exception:
+            app.logger.warning("Plate-wise bearing direction verification failed", exc_info=True)
+            plate_bearing_result = {"rows": [], "summary": {"total": 0, "ok": 0, "check": 0}}
+
         if not supplier["rows"]:
             return (
                 "No supplier plates could be parsed from the supplier PDF. "
@@ -2706,6 +2888,8 @@ def generate():
             logo_path=logo_path,
             report_orientation=report_orientation,
             report_date_str=_safe_report_date(client_local_date),
+            bearing_result=bearing_result,
+            plate_bearing_result=plate_bearing_result,
         )
         return send_file(
             pdf_buffer,
